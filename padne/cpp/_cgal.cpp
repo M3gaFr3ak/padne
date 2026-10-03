@@ -92,6 +92,14 @@ public:
     int get_height() const { return height; }
 };
 
+// A region of the domain that should be refined to a given target edge length
+// (in mm) regardless of the boundary-distance size field. Used to refine SMD
+// pads. The referenced polygons must outlive the mesher run.
+struct RefinementRegion {
+    const CGALPolygon* polygon;
+    double size;
+};
+
 // Variable density mesh size criteria implementation
 // This is effectively a reimplementation of CGAL::Delaunay_mesh_size_criteria_2,
 // except it supports a variable size field based on a distance from boundary map
@@ -105,6 +113,7 @@ protected:
     double min_distance;
     double max_distance;
     double size_factor;
+    const std::vector<RefinementRegion>* refinement_regions;
 
 public:
     typedef CGAL::Delaunay_mesh_criteria_2<CDT> Base;
@@ -117,9 +126,11 @@ public:
                                           const double min_dist = 0.0,
                                           const double max_dist = 0.0,
                                           const double sz_factor = 1.0,
+                                          const std::vector<RefinementRegion>* regions = nullptr,
                                           const Geom_traits& traits = Geom_traits())
       : Base(aspect_bound, traits), sizebound(size_bound), distance_map_ptr(dist_map_ptr),
-        min_distance(min_dist), max_distance(max_dist), size_factor(sz_factor) {}
+        min_distance(min_dist), max_distance(max_dist), size_factor(sz_factor),
+        refinement_regions(regions) {}
 
     inline double size_bound() const { return sizebound; }
 
@@ -163,6 +174,7 @@ public:
         const double min_distance;
         const double max_distance;
         const double size_factor;
+        const std::vector<RefinementRegion>* refinement_regions;
 
     public:
         typedef typename Base::Is_bad::Point_2 Point_2;
@@ -173,10 +185,12 @@ public:
                const double min_dist,
                const double max_dist,
                const double sz_factor,
+               const std::vector<RefinementRegion>* regions,
                const Geom_traits& traits)
           : Base::Is_bad(aspect_bound, traits),
             base_size_bound(size_bound), distance_map_ptr(dist_map_ptr),
-            min_distance(min_dist), max_distance(max_dist), size_factor(sz_factor) {}
+            min_distance(min_dist), max_distance(max_dist), size_factor(sz_factor),
+            refinement_regions(regions) {}
 
         CGAL::Mesh_2::Face_badness operator()(const Quality q) const {
             if (q.size > 1) {
@@ -210,6 +224,14 @@ public:
 
             // Compute effective size bound using piecewise linear scaling
             double effective_size_bound = compute_effective_size_bound(boundary_distance);
+
+            // Explicit refinement regions (e.g. SMD pads) override the
+            // boundary-distance field when they ask for a smaller element.
+            double region_bound = refinement_size_bound(cx, cy);
+            if (region_bound < effective_size_bound) {
+                effective_size_bound = region_bound;
+            }
+
             double squared_size_bound = effective_size_bound * effective_size_bound;
 
             double a = CGAL::to_double(squared_distance(pb, pc));
@@ -284,11 +306,27 @@ public:
             double t = (boundary_distance - min_distance) / (max_distance - min_distance);
             return base_size_bound * (1.0 + t * (size_factor - 1.0));
         }
+
+        // Smallest target size among the explicit refinement regions that
+        // contain (x, y), or +inf when the point is in none of them.
+        double refinement_size_bound(double x, double y) const {
+            if (!refinement_regions) {
+                return std::numeric_limits<double>::infinity();
+            }
+            double bound = std::numeric_limits<double>::infinity();
+            for (const auto& region : *refinement_regions) {
+                if (region.size < bound && region.polygon->contains(x, y)) {
+                    bound = region.size;
+                }
+            }
+            return bound;
+        }
     };
 
   Is_bad is_bad_object() const
   { return Is_bad(this->bound(), size_bound(), distance_map_ptr,
                   min_distance, max_distance, size_factor,
+                  refinement_regions,
                   this->traits /* from the bad class */); }
 };
 
@@ -381,7 +419,9 @@ nb::dict mesh(const nb::object& py_config,
               const std::vector<std::pair<double, double>>& vertices,
               const std::vector<std::pair<int, int>>& segments,
               const std::vector<std::pair<double, double>>& seeds,
-              const PolyBoundaryDistanceMap* distance_map_ptr) {
+              const PolyBoundaryDistanceMap* distance_map_ptr,
+              const std::vector<nb::object>& region_polygons,
+              const std::vector<double>& region_sizes) {
 
     // Pull the meshing criteria out of the Python config object while the GIL
     // is held; everything below this point is pure C++.
@@ -392,6 +432,23 @@ nb::dict mesh(const nb::object& py_config,
     const double min_distance = nb::cast<double>(py_config.attr("variable_density_min_distance"));
     const double max_distance = nb::cast<double>(py_config.attr("variable_density_max_distance"));
     const double size_factor = nb::cast<double>(py_config.attr("variable_size_maximum_factor"));
+
+    // Convert the refinement regions while the GIL is held: CGALPolygon reads
+    // Shapely objects through Python. The vector is kept alive for the whole
+    // function so the criteria can hold pointers into it.
+    std::vector<CGALPolygon> region_shapes;
+    region_shapes.reserve(region_polygons.size());
+    for (const auto& region_polygon : region_polygons) {
+        region_shapes.emplace_back(region_polygon);
+    }
+    std::vector<RefinementRegion> refinement_regions;
+    refinement_regions.reserve(region_shapes.size());
+    for (size_t i = 0; i < region_shapes.size(); i++) {
+        double size = i < region_sizes.size() ? region_sizes[i] : 0.0;
+        if (size > 0) {
+            refinement_regions.push_back(RefinementRegion{&region_shapes[i], size});
+        }
+    }
 
     CDT cdt;
     {
@@ -406,7 +463,8 @@ nb::dict mesh(const nb::object& py_config,
 
         Mesher mesher(cdt);
         mesher.set_criteria(Criteria(aspect_bound, maximum_size, distance_map_ptr,
-                                     min_distance, max_distance, size_factor, K()));
+                                     min_distance, max_distance, size_factor,
+                                     &refinement_regions, K()));
         set_mesher_seeds(mesher, seeds);
         mesher.refine_mesh();
     }
@@ -726,6 +784,7 @@ NB_MODULE(_cgal, m) {
     m.def("mesh", &mesh,
           "config"_a, "vertices"_a, "segments"_a, "seeds"_a,
           "distance_map"_a.none(),
+          "region_polygons"_a, "region_sizes"_a,
           R"pbdoc(
         Meshes a set of points and segments using CGAL.
         Args:
@@ -734,6 +793,10 @@ NB_MODULE(_cgal, m) {
             segments: A list of segments (edges).
             seeds: A list of seed points for the meshing process.
             distance_map: Optional PolyBoundaryDistanceMap, or None.
+            region_polygons: Shapely polygons that must be refined to a given
+                target edge length regardless of the boundary-distance field.
+            region_sizes: Per-region target edge lengths (in the same units as
+                the coordinates), parallel to region_polygons.
         Returns:
             A dictionary containing the results of the meshing process.
     )pbdoc");

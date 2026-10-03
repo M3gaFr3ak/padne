@@ -1680,6 +1680,30 @@ class TestMesher:
 
         assert seed_found, "Seed point was not included in the mesh"
 
+    def test_refinement_regions_refine_locally(self):
+        """A refinement region forces smaller elements only inside it."""
+        square = shapely.geometry.box(0, 0, 10, 10)
+        region = shapely.geometry.box(4, 4, 6, 6)
+
+        mesher = Mesher(Mesher.Config(maximum_size=0.6))
+        base = mesher.poly_to_mesh(square)
+        refined = mesher.poly_to_mesh(square, [], [(region, 0.15)])
+
+        def max_edge_inside(msh, predicate):
+            longest = 0.0
+            for face in msh.faces:
+                centroid = face.centroid
+                if not predicate(centroid.x, centroid.y):
+                    continue
+                for edge in face.edges:
+                    longest = max(longest, edge.origin.p.distance(edge.next.origin.p))
+            return longest
+
+        inside = lambda x, y: 4.0 <= x <= 6.0 and 4.0 <= y <= 6.0
+        assert max_edge_inside(refined, inside) < 0.25
+        assert max_edge_inside(base, inside) > max_edge_inside(refined, inside)
+        assert len(refined.vertices) > len(base.vertices)
+
     def test_seed_points_on_boundary(self):
         """Test behavior with seed points on the polygon boundary."""
         # Create a square

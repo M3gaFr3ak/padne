@@ -491,6 +491,9 @@ class Mesher:
         variable_density_max_distance: float = 3.0
         variable_size_maximum_factor: float = 3.0
         distance_map_quantization: float = 1.0
+        # Target edge length (mm) for explicit refinement regions such as SMD
+        # pads. Zero disables region refinement.
+        pad_refine_size: float = 0.0
 
         # Static relaxed configuration for disconnected copper triangulation
         RELAXED = None  # Will be initialized after class definition
@@ -519,6 +522,9 @@ class Mesher:
 
             if self.distance_map_quantization <= 0:
                 raise ValueError(f"distance_map_quantization must be positive, got {self.distance_map_quantization}")
+
+            if self.pad_refine_size < 0:
+                raise ValueError(f"pad_refine_size must be non-negative, got {self.pad_refine_size}")
 
     def __init__(self, config: Optional['Mesher.Config'] = None):
         self.config = config if config is not None else Mesher.Config()
@@ -570,12 +576,17 @@ class Mesher:
 
     def poly_to_mesh(self,
                      poly: shapely.geometry.Polygon,
-                     seed_points: list[Point | shapely.geometry.Point] = []) -> Mesh:
+                     seed_points: list[Point | shapely.geometry.Point] = [],
+                     refinement_regions: list[tuple[shapely.geometry.Polygon, float]] = []
+                     ) -> Mesh:
         """
         Convert a Shapely polygon to a triangular mesh.
 
         Args:
             poly: A Shapely polygon, potentially with holes
+            seed_points: Additional seed points to include
+            refinement_regions: (polygon, target edge length) pairs that force
+                local mesh refinement, e.g. SMD pads
 
         Returns:
             A Mesh object representing the triangulated polygon
@@ -584,6 +595,9 @@ class Mesher:
 
         vertices, segments, seeds = self._prepare_polygon_for_cgal(poly, seed_points)
 
+        region_polygons = [region for region, _ in refinement_regions]
+        region_sizes = [size for _, size in refinement_regions]
+
         try:
             # Create distance map for variable density meshing only if enabled
             if self.config.is_variable_density:
@@ -591,7 +605,8 @@ class Mesher:
             else:
                 distance_map = None
 
-            cgal_output = cgal.mesh(self.config, vertices, segments, seeds, distance_map)
+            cgal_output = cgal.mesh(self.config, vertices, segments, seeds,
+                                    distance_map, region_polygons, region_sizes)
         except RuntimeError as e:
             # Re-raise as MeshingException to provide clearer error context
             raise MeshingException(str(e)) from e
