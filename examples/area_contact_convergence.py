@@ -120,9 +120,10 @@ def main():
     print()
     hs = sorted(H_SWEEP)
     for mode in ("point", "robin"):
-        first, last = rows[(mode, hs[0])], rows[(mode, hs[-1])]
-        print(f"{mode:6}: peak J {first[1]:8.1f} -> {last[1]:8.1f} A/mm2 "
-              f"(x{last[1] / first[1]:.1f}); pad P {first[0]:.6f} -> {last[0]:.6f} W")
+        coarse, fine = rows[(mode, hs[-1])], rows[(mode, hs[0])]
+        print(f"{mode:6}: h {hs[-1]} -> {hs[0]}  peak J {coarse[1]:8.1f} -> "
+              f"{fine[1]:8.1f} A/mm2 (x{fine[1] / coarse[1]:.1f}); pad P "
+              f"{coarse[0]:.6f} -> {fine[0]:.6f} W")
     a, b = hs[0], hs[1]           # the two finest meshes
     p_a = rows[("robin", a)][0]
     p_b = rows[("robin", b)][0]

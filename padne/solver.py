@@ -205,10 +205,13 @@ def layer_cut_current(solution: Solution,
     Across an interior contour this is the partial extraction, so nested
     contours accumulate monotonically toward the full through-current.
 
-    Meshes with no vertices inside the region contribute nothing. The region
-    must not contain a network current source/sink: the injected current lives
-    in the system right-hand side, so it is invisible to the in-plane Laplacian
-    alone.
+    Meshes with no vertices inside the region contribute nothing. `sum_{i in S}
+    (L @ V)_i` equals the total current *extracted* inside S — from vertical
+    contacts and from any point-coupled network source/sink whose mesh vertex
+    lies inside S (the injected current shows up in the in-plane divergence via
+    the system equations). A contour may therefore contain point-coupled
+    terminals and measures them too; exclude them only when you want to
+    attribute the current purely to contacts.
 
     Note the contact spreads onto vertices of rim triangles just outside the
     pad polygon, so a contour exactly on (or barely outside) the pad edge
