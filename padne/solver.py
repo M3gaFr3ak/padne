@@ -181,6 +181,48 @@ def laplace_operator(mesh: mesh.Mesh) -> scipy.sparse.coo_matrix:
     return scipy.sparse.coo_matrix((values, (rows, cols)), shape=(N, N), dtype=DTYPE)
 
 
+def layer_cut_current(solution: Solution,
+                      layer_index: int,
+                      region: shapely.geometry.base.BaseGeometry) -> float:
+    """
+    Net in-plane current (A) flowing *into* the vertices inside `region` on
+    `solution.problem.layers[layer_index]`.
+
+    This is the discrete divergence theorem applied to the per-mesh cotangent
+    Laplacian (scaled by the layer's sheet conductance): for the set S of
+    vertices inside `region`, `sum_{i in S} (L @ V)_i` is the net in-plane
+    current *leaving* S, so the inflow is its negation. By continuity this
+    equals the total vertical extraction inside S, independently of the
+    contact stamp (no terminal voltage needed). Across a contour that encloses
+    a contact it equals the through-current; across an interior contour it is
+    the partial extraction, so nested contours accumulate monotonically to the
+    full current.
+
+    Positive means current flows into the region. Meshes with no vertices
+    inside the region contribute nothing. The region must not contain a
+    network current source/sink: the injected current lives in the system
+    right-hand side, so it is invisible to the in-plane Laplacian alone.
+
+    Note the contact spreads onto vertices of rim triangles just outside the
+    pad polygon, so a contour exactly on (or barely outside) the pad edge
+    slightly under-counts; use a contour comfortably enclosing the pad for the
+    full through-current.
+    """
+    layer_solution = solution.layer_solutions[layer_index]
+    conductance = solution.problem.layers[layer_index].conductance
+    total = 0.0
+    for msh, potential in zip(layer_solution.meshes, layer_solution.potentials):
+        positions = msh.positions()
+        if len(positions) == 0:
+            continue
+        inside = shapely.contains_xy(region, positions[:, 0], positions[:, 1])
+        if not inside.any():
+            continue
+        residual = conductance * (laplace_operator(msh).tocsr() @ potential.values)
+        total += float(residual[inside].sum())
+    return -total
+
+
 @dataclass
 class VertexIndexer:
     """

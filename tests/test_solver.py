@@ -639,6 +639,32 @@ class TestAreaContactModel:
         # Far below the order-1 W the sign bug produced at fine meshes.
         assert values[-1] < 1e-3
 
+    def test_cut_current_equals_through_current(self):
+        """The in-plane current crossing a contour around the pad equals the
+        1 A through-current, independently of the contact stamp; nested
+        contours accumulate monotonically."""
+        solution = self._solve_synthetic(9e4, mesh.Mesher.Config(
+            maximum_size=0.5, pad_refine_size=0.1, pad_refine_transition=0.0))
+
+        def cut(distance):
+            return solver.layer_cut_current(solution, 0,
+                                            self._PAD.buffer(distance))
+
+        # Interior contours carry only the extraction inside them; growing
+        # toward the pad edge accumulates more, reaching the full through-
+        # current at and beyond the pad boundary. For a contact-limited joint
+        # (g ~ 9e4) most of the current is extracted in the rim, so an inset
+        # contour sees only a small fraction.
+        interior = [cut(-0.6), cut(-0.4), cut(-0.2)]
+        assert interior[0] <= interior[1] <= interior[2]
+        assert 0.0 < interior[-1] < 0.5
+        # A contour comfortably enclosing the pad (and the one-element rim its
+        # contact spreads onto) carries the whole through-current, and does so
+        # exactly: this is the discrete divergence identity, independent of the
+        # contact stamp.
+        assert cut(+0.5) == pytest.approx(1.0, abs=1e-9)
+        assert cut(+1.0) == pytest.approx(1.0, abs=1e-9)
+
 
 class TestEffectivePadRefineSize:
     """The auto/override/minimum-size contract for contact-pad refinement."""
@@ -666,6 +692,43 @@ class TestEffectivePadRefineSize:
     def test_negative_minimum_size_is_rejected(self):
         with pytest.raises(ValueError, match="pad_refine_min_size"):
             mesh.Mesher.Config(pad_refine_min_size=-1.0)
+
+
+class TestAreaContactIntegration:
+    """End-to-end: KiCad extraction -> wiring -> contacts -> solve -> 11b."""
+
+    def test_simple_geometry_contacts_carry_the_loop_current(self,
+                                                             kicad_test_projects):
+        project = kicad_test_projects["simple_geometry"]
+        prob = kicad.load_kicad_project(project.pro_path)
+        assert prob.pad_refine_size > 0
+        solution = solver.solve(prob)
+        assert solution.solver_info.residual_norm < 1e-6
+
+        element_currents = []
+        for network in prob.networks:
+            contacts = [e for e in network.elements
+                        if isinstance(e, problem.AreaContact)]
+            if len(contacts) < 2:
+                continue
+            # A tight contour around each pad: the in-plane cut current is the
+            # current that pad conducts.
+            inflows = [
+                solver.layer_cut_current(
+                    solution, prob.layers.index(c.layer), c.shape.buffer(0.4))
+                for c in contacts
+            ]
+            # Two-terminal element: what enters one pad leaves the other. This
+            # also confirms the connectivity marker carries no current.
+            assert sum(inflows) == pytest.approx(0.0, abs=1e-6)
+            assert inflows[0] == pytest.approx(-inflows[1], rel=1e-6)
+            assert abs(inflows[0]) > 0.0
+            element_currents.append(abs(inflows[0]))
+
+        # simple_geometry is one series loop (a 1 V source and a 10 mOhm
+        # resistor), so both elements carry the same current magnitude.
+        assert len(element_currents) == 2
+        assert element_currents[0] == pytest.approx(element_currents[1], rel=1e-6)
 
 
 class TestSyntheticProblems:
