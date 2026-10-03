@@ -937,41 +937,56 @@ def collect_contact_coverage(problem: solver.problem.Problem,
                              ) -> dict[str, list[tuple[tuple[float, float],
                                                        tuple[float, float, float]]]]:
     """
-    Compute per-layer point coverage for SMT contact regions.
+    Compute per-layer point coverage for SMT contacts.
 
-    Every mesh vertex that lies inside a contact/refinement region is returned,
-    coloured by the network that references the pad: red for networks with a
-    source, gray otherwise. This mirrors how THT pads are marked by their rim
-    connection points.
+    Prefers the actual `AreaContact` elements (coloured by their owning network:
+    red if the network has a source, gray otherwise). Falls back to the
+    `refinement_regions` preview when no contacts exist yet. Mirrors how THT pads
+    are marked by their rim connection points.
     """
-    regions_by_layer: dict[str, list] = {}
-    for layer_name, region_shape in getattr(problem, "refinement_regions", []):
-        regions_by_layer.setdefault(layer_name, []).append(region_shape)
+    AreaContact = solver.problem.AreaContact
 
-    if not regions_by_layer:
-        return {}
-
-    # Colour each region by the network of a connection that lies inside it
-    # (pad-centre connections). Red wins over gray if several match.
-    region_colors: dict[str, list[Optional[tuple[float, float, float]]]] = {
-        layer_name: [None] * len(shapes)
-        for layer_name, shapes in regions_by_layer.items()
-    }
+    # (layer_name, shape, colour) entries, preferring real contacts.
+    entries: list[tuple[str, object, tuple[float, float, float]]] = []
     for network in problem.networks:
         color = (1.0, 0.0, 0.0) if network.has_source else (0.5, 0.5, 0.5)
-        for connection in network.connections:
-            shapes = regions_by_layer.get(connection.layer.name)
-            if not shapes:
-                continue
-            for index, region_shape in enumerate(shapes):
-                if not region_shape.contains(connection.point):
+        for element in network.elements:
+            if isinstance(element, AreaContact):
+                entries.append((element.layer.name, element.shape, color))
+
+    if not entries:
+        # Preview fallback: refinement regions, coloured by a connection inside.
+        regions_by_layer: dict[str, list] = {}
+        for layer_name, region_shape in getattr(problem, "refinement_regions", []):
+            regions_by_layer.setdefault(layer_name, []).append(region_shape)
+        if not regions_by_layer:
+            return {}
+        region_colors: dict[str, list] = {
+            layer_name: [None] * len(shapes)
+            for layer_name, shapes in regions_by_layer.items()
+        }
+        for network in problem.networks:
+            color = (1.0, 0.0, 0.0) if network.has_source else (0.5, 0.5, 0.5)
+            for connection in network.connections:
+                shapes = regions_by_layer.get(connection.layer.name)
+                if not shapes:
                     continue
-                if region_colors[connection.layer.name][index] is None or color[0] == 1.0:
-                    region_colors[connection.layer.name][index] = color
+                for index, region_shape in enumerate(shapes):
+                    if region_shape.contains(connection.point):
+                        if region_colors[connection.layer.name][index] is None or color[0] == 1.0:
+                            region_colors[connection.layer.name][index] = color
+        for layer_name, shapes in regions_by_layer.items():
+            for index, region_shape in enumerate(shapes):
+                entries.append((layer_name, region_shape,
+                                region_colors[layer_name][index] or (0.5, 0.5, 0.5)))
+
+    entries_by_layer: dict[str, list] = {}
+    for layer_name, shape, color in entries:
+        entries_by_layer.setdefault(layer_name, []).append((shape, color))
 
     coverage: dict[str, list] = {}
     for layer, layer_solution in zip(problem.layers, layer_solutions):
-        shapes = regions_by_layer.get(layer.name)
+        shapes = entries_by_layer.get(layer.name)
         if not shapes:
             continue
 
@@ -984,11 +999,10 @@ def collect_contact_coverage(problem: solver.problem.Problem,
             continue
         points = np.asarray(coords)
 
-        for index, region_shape in enumerate(shapes):
-            color = region_colors[layer.name][index]
-            if color is None:
-                color = (0.5, 0.5, 0.5)
-            min_x, min_y, max_x, max_y = region_shape.bounds
+        # Deduplicate by coordinate with red-priority when regions overlap.
+        assigned: dict[tuple[float, float], tuple[float, float, float]] = {}
+        for shape, color in shapes:
+            min_x, min_y, max_x, max_y = shape.bounds
             box_mask = (
                 (points[:, 0] >= min_x) & (points[:, 0] <= max_x) &
                 (points[:, 1] >= min_y) & (points[:, 1] <= max_y)
@@ -996,10 +1010,17 @@ def collect_contact_coverage(problem: solver.problem.Problem,
             if not box_mask.any():
                 continue
             candidates = points[box_mask]
-            inside = shapely.contains_xy(region_shape, candidates[:, 0], candidates[:, 1])
-            layer_points = coverage.setdefault(layer.name, [])
+            inside = shapely.contains_xy(shape, candidates[:, 0], candidates[:, 1])
             for x, y in candidates[inside]:
-                layer_points.append(((float(x), float(y)), color))
+                key = (float(x), float(y))
+                existing = assigned.get(key)
+                if existing is None or color[0] == 1.0:
+                    assigned[key] = color
+
+        if assigned:
+            coverage[layer.name] = [
+                (coordinate, color) for coordinate, color in assigned.items()
+            ]
 
     return coverage
 

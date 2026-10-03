@@ -9,6 +9,7 @@ import traceback
 import functools
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Optional
 
 import padne.kicad
 import padne.solver
@@ -100,6 +101,34 @@ def add_mesher_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_contact_args(parser: argparse.ArgumentParser) -> None:
+    """Add SMD area-contact override arguments to a parser."""
+    parser.add_argument(
+        "--contact-mode",
+        choices=["robin", "point"],
+        default=None,
+        help="Override the SMD area-contact mode (default: robin, or the CONTACT directive)",
+    )
+    parser.add_argument(
+        "--contact-g",
+        type=float,
+        default=None,
+        help="Override the contact conductance per unit area [S/mm^2]",
+    )
+
+
+def contact_override_from_args(args: argparse.Namespace) -> Optional[padne.kicad.ContactSpec]:
+    """Build a ContactSpec override from CLI arguments, or None."""
+    if getattr(args, "contact_mode", None) is None and getattr(args, "contact_g", None) is None:
+        return None
+    base = padne.kicad.ContactSpec.default()
+    return padne.kicad.ContactSpec(
+        conductance_per_area=args.contact_g if args.contact_g is not None
+        else base.conductance_per_area,
+        mode=args.contact_mode if args.contact_mode is not None else base.mode,
+    )
+
+
 def mesher_config_from_args(args: argparse.Namespace) -> padne.mesh.Mesher.Config:
     """Construct a Mesher.Config from parsed arguments."""
     return padne.mesh.Mesher.Config(
@@ -145,6 +174,7 @@ def parse_args() -> argparse.Namespace:
         help="Path to the input file",
     )
     add_mesher_args(parser_gui)
+    add_contact_args(parser_gui)
 
     parser_show = subparsers.add_parser(
         "show",
@@ -174,6 +204,7 @@ def parse_args() -> argparse.Namespace:
         help="Path to save the pickled solution file",
     )
     add_mesher_args(parser_solve)
+    add_contact_args(parser_solve)
 
     parser_paraview = subparsers.add_parser(
         "paraview",
@@ -217,7 +248,8 @@ def do_gui(args: argparse.Namespace) -> int:
     log = logging.getLogger(__name__)
     with context.timing_session() as session:
         log.info(f"Loading KiCad project for GUI: {args.kicad_pro_file}")
-        prob = padne.kicad.load_kicad_project(args.kicad_pro_file)
+        prob = padne.kicad.load_kicad_project(
+            args.kicad_pro_file, contact_override=contact_override_from_args(args))
         log.info("Solving problem for GUI...")
         mesher_config = mesher_config_from_args(args)
 
@@ -240,7 +272,8 @@ def do_solve(args: argparse.Namespace) -> None:
     log = logging.getLogger(__name__)
     with context.timing_session() as session:
         log.info(f"Loading KiCad project: {args.kicad_pro_file}")
-        prob = padne.kicad.load_kicad_project(args.kicad_pro_file)
+        prob = padne.kicad.load_kicad_project(
+            args.kicad_pro_file, contact_override=contact_override_from_args(args))
         log.info("Solving problem...")
         mesher_config = mesher_config_from_args(args)
         solution = padne.solver.solve(prob, mesher_config=mesher_config)

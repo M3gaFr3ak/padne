@@ -262,6 +262,13 @@ def generate_meshes_for_problem(prob: problem.Problem,
                           list[tuple[shapely.geometry.Polygon, float]]]] = []
     mesh_index_to_layer_index: list[int] = []
 
+    # The CLI/config override wins; otherwise the Problem's screening default
+    # (computed from the contact conductance) applies.
+    effective_refine_size = (
+        mesher.config.pad_refine_size if mesher.config.pad_refine_size > 0
+        else getattr(prob, "pad_refine_size", 0.0)
+    )
+
     for layer_i, layer in enumerate(prob.layers):
         seed_points_in_layer = collect_seed_points(prob, layer)
 
@@ -305,7 +312,7 @@ def generate_meshes_for_problem(prob: problem.Problem,
             # Collect explicit refinement regions that fall on this geometry
             # (currently SMD pad footprints) and clip them to the copper.
             regions_for_geom: list[tuple[shapely.geometry.Polygon, float]] = []
-            if mesher.config.pad_refine_size > 0:
+            if effective_refine_size > 0:
                 for region_layer, region_shape in prob.refinement_regions:
                     if region_layer != layer.name:
                         continue
@@ -322,7 +329,7 @@ def generate_meshes_for_problem(prob: problem.Problem,
                             if geom.geom_type == "Polygon"
                         ]
                     for region_polygon in polygons:
-                        regions_for_geom.append((region_polygon, mesher.config.pad_refine_size))
+                        regions_for_geom.append((region_polygon, effective_refine_size))
 
             mesh_jobs.append((layer.geoms[geom_i], seed_points_in_geom, regions_for_geom))
             mesh_index_to_layer_index.append(layer_i)
