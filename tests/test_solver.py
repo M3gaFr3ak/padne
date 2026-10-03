@@ -576,51 +576,68 @@ class TestAreaContactModel:
         i_terminal = node_indexer.node_to_global_index[term]
         for vertex_index, area in resolved:
             r = 1.0 / (contact.conductance_per_area * area)
-            L_star[vertex_index, vertex_index] += 1 / r
-            L_star[vertex_index, i_terminal] -= 1 / r
-            L_star[i_terminal, vertex_index] -= 1 / r
-            L_star[i_terminal, i_terminal] += 1 / r
+            # Resistor convention: negative diagonal, positive off-diagonal.
+            L_star[vertex_index, vertex_index] -= 1 / r
+            L_star[vertex_index, i_terminal] += 1 / r
+            L_star[i_terminal, vertex_index] += 1 / r
+            L_star[i_terminal, i_terminal] -= 1 / r
 
         assert np.allclose(L_robin.toarray(), L_star.toarray())
 
+    _PLANE = (0, 0, 10, 5)
+    _PAD = shapely.geometry.box(6, 1.5, 8, 3.5)
+
+    def _solve_synthetic(self, conductance_per_area, config):
+        layer = problem.Layer(
+            shape=shapely.geometry.MultiPolygon([shapely.geometry.box(*self._PLANE)]),
+            name="F.Cu", conductance=2082.0, thickness=0.035)
+        source = problem.Connection(layer=layer, point=shapely.geometry.Point(0.25, 2.5))
+        terminal = problem.NodeID()
+        network = problem.Network(connections=[source], elements=[
+            problem.CurrentSource(f=source.node_id, t=terminal, current=1.0),
+            problem.AreaContact(layer=layer, shape=shapely.geometry.MultiPolygon([self._PAD]),
+                                node=terminal, conductance_per_area=conductance_per_area)])
+        prob = problem.Problem(
+            layers=[layer], networks=[network],
+            refinement_regions=[("F.Cu", shapely.geometry.MultiPolygon([self._PAD]))])
+        return solver.solve(prob, config)
+
+    def _pad_power(self, solution):
+        power = 0.0
+        layer_solution = solution.layer_solutions[0]
+        for msh, density in zip(layer_solution.meshes, layer_solution.power_densities):
+            for face in msh.faces:
+                centroid = face.centroid
+                if not self._PAD.contains(shapely.geometry.Point(centroid.x, centroid.y)):
+                    continue
+                points = [edge.origin.p for edge in face.edges]
+                area = abs((points[1].x - points[0].x) * (points[2].y - points[0].y)
+                           - (points[1].y - points[0].y) * (points[2].x - points[0].x)) / 2
+                power += density[face] * area
+        return power
+
     def test_pad_power_is_stable_in_the_contact_limited_regime(self):
         """With a moderate contact conductance the in-plane pad power converges."""
-        plane = (0, 0, 10, 5)
-        pad = shapely.geometry.box(6, 1.5, 8, 3.5)
-        conductance_per_area = 500.0  # lambda ~ 2 mm, well-conditioned
-
         def solve(target):
-            layer = problem.Layer(
-                shape=shapely.geometry.MultiPolygon([shapely.geometry.box(*plane)]),
-                name="F.Cu", conductance=2082.0, thickness=0.035)
-            source = problem.Connection(layer=layer, point=shapely.geometry.Point(0.25, 2.5))
-            terminal = problem.NodeID()
-            network = problem.Network(connections=[source], elements=[
-                problem.CurrentSource(f=source.node_id, t=terminal, current=1.0),
-                problem.AreaContact(layer=layer, shape=shapely.geometry.MultiPolygon([pad]),
-                                    node=terminal, conductance_per_area=conductance_per_area)])
-            prob = problem.Problem(layers=[layer], networks=[network],
-                                   refinement_regions=[("F.Cu", shapely.geometry.MultiPolygon([pad]))])
-            return solver.solve(prob, mesh.Mesher.Config(
+            return self._solve_synthetic(500.0, mesh.Mesher.Config(
                 maximum_size=1.0, pad_refine_size=target, pad_refine_transition=0.0))
 
-        def pad_power(solution):
-            layer_solution = solution.layer_solutions[0]
-            power = 0.0
-            for msh, density in zip(layer_solution.meshes, layer_solution.power_densities):
-                for face in msh.faces:
-                    centroid = face.centroid
-                    if not pad.contains(shapely.geometry.Point(centroid.x, centroid.y)):
-                        continue
-                    points = [edge.origin.p for edge in face.edges]
-                    area = abs((points[1].x - points[0].x) * (points[2].y - points[0].y)
-                               - (points[1].y - points[0].y) * (points[2].x - points[0].x)) / 2
-                    power += density[face] * area
-            return power
+        assert self._pad_power(solve(0.15)) == pytest.approx(
+            self._pad_power(solve(0.2)), rel=0.05)
 
-        coarse = pad_power(solve(0.2))
-        fine = pad_power(solve(0.15))
-        assert fine == pytest.approx(coarse, rel=0.05)
+    def test_near_short_contact_power_converges(self):
+        """The near-short joint (g ~ 9e4) must converge, not blow up."""
+        def power(h):
+            # Global uniform refinement, no region-boundary artefacts.
+            return self._pad_power(self._solve_synthetic(
+                9e4, mesh.Mesher.Config(maximum_size=h)))
+
+        values = [power(h) for h in (0.4, 0.2, 0.1, 0.05)]
+        assert all(value > 0 for value in values)
+        # Refinement must not explode: the last two levels agree within 5%.
+        assert values[-1] == pytest.approx(values[-2], rel=0.05)
+        # Far below the order-1 W the sign bug produced at fine meshes.
+        assert values[-1] < 1e-3
 
 
 class TestSyntheticProblems:

@@ -662,11 +662,15 @@ def stamp_contacts_into_system(filtered_networks: list[problem.Network],
             total = 0.0
             for vertex_index, area in resolved:
                 term = conductance * area
-                L[vertex_index, vertex_index] += term
-                L[vertex_index, i_terminal] -= term
-                L[i_terminal, vertex_index] -= term
+                # Same sign convention as the Resistor stamp: negative on the
+                # diagonal, positive off-diagonal (the Laplacian diagonal is
+                # negative). A positive diagonal here would be a negative
+                # conductance and destabilise near-short contacts.
+                L[vertex_index, vertex_index] -= term
+                L[vertex_index, i_terminal] += term
+                L[i_terminal, vertex_index] += term
                 total += term
-            L[i_terminal, i_terminal] += total
+            L[i_terminal, i_terminal] -= total
 
 
 def stamp_network_into_system(network: problem.Network,
