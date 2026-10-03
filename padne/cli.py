@@ -91,7 +91,8 @@ def add_mesher_args(parser: argparse.ArgumentParser) -> None:
         "--pad-refine-size",
         type=float,
         default=default_config.pad_refine_size,
-        help="Target mesh edge length (mm) inside SMD pad regions (0 disables)"
+        help="Target mesh edge length (mm) inside SMD pad regions; "
+             "0 uses the computed screening default"
     )
     parser.add_argument(
         "--pad-refine-transition",

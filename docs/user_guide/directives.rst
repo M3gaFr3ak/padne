@@ -239,7 +239,9 @@ Example:
      size (``2 * lambda``). It captures the perimeter localisation but
      does not meet the 5 % pad-power convergence gate; use
      ``--pad-refine-size`` of roughly ``lambda/2`` for a converged
-     result. See ``examples/area_contact_convergence.py``.
+     result. See ``examples/area_contact_convergence.py``. There is no
+     CLI switch to disable pad refinement while contacts are enabled;
+     use ``--contact-mode point`` or a very large ``--pad-refine-size``.
    * The contact conducts exactly the pad's through-current. This can be
      checked independently with ``solver.layer_cut_current``
      (sink-positive: a pad that draws current out of the copper reads
