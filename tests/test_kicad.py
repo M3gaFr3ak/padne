@@ -1243,6 +1243,18 @@ class TestContactDirective:
         with pytest.raises(ValueError, match="mode"):
             kicad.ContactSpec.from_directive(directive)
 
+    def test_unknown_parameters_warn_and_are_ignored(self, caplog):
+        # `thickness=`/`solder=` are not real CONTACT parameters; they must
+        # warn rather than silently falling back to the defaults.
+        directive = kicad.Directive.parse(
+            "!padne CONTACT thickness=75u solder=SAC305")
+        with caplog.at_level("WARNING"):
+            spec = kicad.ContactSpec.from_directive(directive)
+        assert spec.conductance_per_area == pytest.approx(
+            kicad.ContactSpec.default().conductance_per_area)
+        assert "thickness" in caplog.text
+        assert "solder" in caplog.text
+
     def test_contacts_default_on_for_referenced_smd_pads(self, kicad_test_projects):
         project = kicad_test_projects["simple_geometry"]
         result = kicad.load_kicad_project(project.pro_path)

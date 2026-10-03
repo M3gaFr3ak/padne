@@ -642,7 +642,8 @@ class TestAreaContactModel:
     def test_cut_current_equals_through_current(self):
         """The in-plane current crossing a contour around the pad equals the
         1 A through-current, independently of the contact stamp; nested
-        contours accumulate monotonically."""
+        contours accumulate monotonically (magnitudes; the sign convention is
+        covered by test_cut_current_is_sink_positive)."""
         solution = self._solve_synthetic(9e4, mesh.Mesher.Config(
             maximum_size=0.5, pad_refine_size=0.1, pad_refine_transition=0.0))
 
@@ -655,15 +656,32 @@ class TestAreaContactModel:
         # current at and beyond the pad boundary. For a contact-limited joint
         # (g ~ 9e4) most of the current is extracted in the rim, so an inset
         # contour sees only a small fraction.
-        interior = [cut(-0.6), cut(-0.4), cut(-0.2)]
+        interior = [abs(cut(-0.6)), abs(cut(-0.4)), abs(cut(-0.2))]
         assert interior[0] <= interior[1] <= interior[2]
         assert 0.0 < interior[-1] < 0.5
         # A contour comfortably enclosing the pad (and the one-element rim its
         # contact spreads onto) carries the whole through-current, and does so
         # exactly: this is the discrete divergence identity, independent of the
         # contact stamp.
-        assert cut(+0.5) == pytest.approx(1.0, abs=1e-9)
-        assert cut(+1.0) == pytest.approx(1.0, abs=1e-9)
+        assert abs(cut(+0.5)) == pytest.approx(1.0, abs=1e-9)
+        assert abs(cut(+1.0)) == pytest.approx(1.0, abs=1e-9)
+
+    def test_cut_current_is_sink_positive(self):
+        """A region that draws current out of the copper reads positive."""
+        layer = problem.Layer(
+            shape=shapely.geometry.MultiPolygon([shapely.geometry.box(0, 0, 10, 1)]),
+            name="F.Cu", conductance=2082.0, thickness=0.035)
+        p = problem.Connection(layer=layer, point=shapely.geometry.Point(1.0, 0.5))
+        n = problem.Connection(layer=layer, point=shapely.geometry.Point(9.0, 0.5))
+        network = problem.Network(connections=[p, n], elements=[
+            problem.VoltageSource(p=p.node_id, n=n.node_id, voltage=1.0)])
+        prob = problem.Problem(layers=[layer], networks=[network])
+        solution = solver.solve(prob, mesh.Mesher.Config(maximum_size=0.2))
+
+        source_region = shapely.geometry.box(0.5, 0.1, 1.5, 0.9)
+        sink_region = shapely.geometry.box(8.5, 0.1, 9.5, 0.9)
+        assert solver.layer_cut_current(solution, 0, source_region) < 0
+        assert solver.layer_cut_current(solution, 0, sink_region) > 0
 
 
 class TestEffectivePadRefineSize:
@@ -703,7 +721,9 @@ class TestAreaContactIntegration:
         prob = kicad.load_kicad_project(project.pro_path)
         assert prob.pad_refine_size > 0
         solution = solver.solve(prob)
-        assert solution.solver_info.residual_norm < 1e-6
+        # Scale-independent solve-quality monitor (the absolute residual grows
+        # with the contact conductances).
+        assert solution.solver_info.residual_relative < 1e-9
 
         element_currents = []
         for network in prob.networks:
@@ -712,18 +732,19 @@ class TestAreaContactIntegration:
             if len(contacts) < 2:
                 continue
             # A tight contour around each pad: the in-plane cut current is the
-            # current that pad conducts.
-            inflows = [
+            # current that pad conducts (sink-positive).
+            pad_currents = [
                 solver.layer_cut_current(
                     solution, prob.layers.index(c.layer), c.shape.buffer(0.4))
                 for c in contacts
             ]
-            # Two-terminal element: what enters one pad leaves the other. This
-            # also confirms the connectivity marker carries no current.
-            assert sum(inflows) == pytest.approx(0.0, abs=1e-6)
-            assert inflows[0] == pytest.approx(-inflows[1], rel=1e-6)
-            assert abs(inflows[0]) > 0.0
-            element_currents.append(abs(inflows[0]))
+            # Two-terminal element: one pad is a sink (positive) and one a
+            # source (negative), equal in magnitude. This also confirms the
+            # connectivity marker carries no current.
+            assert sum(pad_currents) == pytest.approx(0.0, abs=1e-6)
+            assert pad_currents[0] == pytest.approx(-pad_currents[1], rel=1e-6)
+            assert abs(pad_currents[0]) > 0.0
+            element_currents.append(abs(pad_currents[0]))
 
         # simple_geometry is one series loop (a 1 V source and a 10 mOhm
         # resistor), so both elements carry the same current magnitude.
@@ -2769,7 +2790,7 @@ def test_solution_residual(project):
     prob = kicad.load_kicad_project(project.pro_path)
     solution = solver.solve(prob)
 
-    # Absolute residual; the area-contact conductances (g*A ~ 1e5 S) make the
-    # system entries large, so the absolute residual scales up slightly.
-    assert solution.solver_info.residual_norm < 1e-6, \
-        f"Residual too large: {solution.solver_info.residual_norm}"
+    # Scale-independent residual (contact conductances g*A ~ 1e5 S make the
+    # absolute residual large but the relative one stays at solver precision).
+    assert solution.solver_info.residual_relative < 1e-9, \
+        f"Relative residual too large: {solution.solver_info.residual_relative}"

@@ -14,12 +14,12 @@ Representative output:
 
 ```
 model   h (mm)    pad P (W)  peak J (A/mm2)  I_cut (A)
-point    0.300    20.452456          5410.3   260.0000
-point    0.150    23.598088          7576.8   260.0000
-point    0.075    27.621230         18575.8   260.0000
-robin    0.300     0.264086          1066.8   260.0000
-robin    0.150     0.308240          1313.7   260.0000
-robin    0.075     0.319214          1323.1   260.0000
+point    0.300    20.452456          5410.3  -260.0000
+point    0.150    23.598088          7576.8  -260.0000
+point    0.075    27.621230         18575.8  -260.0000
+robin    0.300     0.264086          1066.8  -260.0000
+robin    0.150     0.308240          1313.7  -260.0000
+robin    0.075     0.319214          1323.1  -260.0000
 
 robin gate: pad power changes 3.44% from h=0.15 to h=0.075 -> PASS < 5%
 ```
@@ -28,7 +28,8 @@ robin gate: pad power changes 3.44% from h=0.15 to h=0.075 -> PASS < 5%
   pad is resolved — the numerical injection artifact of padne issue #77.
 - **Distributed contact**: both converge (pad power meets the 5% gate by
   `h ≈ λ/2`, where `λ = sqrt(s_sheet / g)`), and the pad still conducts exactly
-  the full current (`I_cut = 260 A`).
+  the full current (`|I_cut| = 260 A`; `layer_cut_current` is sink-positive, so
+  the sign marks source vs sink — here the pad is the source).
 
 ## Board validation (Inverter-Powerstage shunts R10/R13)
 
@@ -45,15 +46,18 @@ shunts; board data lives in the separate `next-gen-ekart` repo):
 | robin | 0.130 (λ/2) | **0.443** | 362 | ±260 |
 
 - Gate: `λ → λ/2` total pad power changes **3.87% (< 5%)**; the default auto size
-  `2λ` is 21.8% off (a screening default, as documented).
+  `2λ` is 21.8% off (a screening default, as documented). Percentages use the
+  finer mesh as the denominator, `|P(coarse) − P(fine)| / P(fine)`.
 - The artifact is removed: at `h = 0.13 mm`, **38.4 W → 0.44 W** (~87x) and peak
   J **12295 → 362 A/mm²** (~34x).
 - 11b: a contour tight around the pad carries **±260 A = dV/R**, confirming the
-  contact conducts the right total; contours at `≳0.5 mm` pull in neighbouring
-  vias, and the bare pad polygon misses the one-element rim the contact spreads
-  onto.
-- Contact-conductance sweep (at `h = λ/2`): `P ∝ 1/√g` — 1.333 / 0.443 / 0.122 W
-  for `g = 9.3e3 / 9.3e4 / 9.3e5 S/mm²` (vs the analytic `√10`); peak J is nearly
-  g-independent. So the absolute pad power carries a `1/√g` uncertainty; the
-  localisation, the convergence, and the point-vs-distributed contrast are the
-  robust results.
+  contact conducts the right total; the sink pad is positive and the source pad
+  negative. Contours at `≳0.5 mm` pull in neighbouring vias, and the bare pad
+  polygon misses the one-element rim the contact spreads onto.
+- Contact-conductance sweep (at fixed `h = λ(g₀)/2`): `P ∝ 1/√g` — 1.333 / 0.443
+  / 0.122 W for `g = 9.3e3 / 9.3e4 / 9.3e5 S/mm²`. The ratios (3.01 / 0.276)
+  differ slightly from `√10 = 3.16` because `h` is held while `λ` moves with `g`,
+  so the high-`g` case is under-resolved and biased low (the expected direction).
+  Peak J is nearly g-independent. So the absolute pad power carries a `1/√g`
+  uncertainty; the localisation, the convergence, and the point-vs-distributed
+  contrast are the robust results.

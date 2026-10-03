@@ -906,6 +906,14 @@ class ContactSpec:
 
     @classmethod
     def from_directive(cls, directive: Directive) -> 'ContactSpec':
+        known = {"mode", "g", "solder_conductivity", "solder_thickness",
+                 "imc_conductivity", "imc_thickness", "void"}
+        unknown = sorted(set(directive.params) - known)
+        if unknown:
+            log.warning(
+                "Ignoring unknown CONTACT parameter(s): %s (known: %s)",
+                ", ".join(unknown), ", ".join(sorted(known)))
+
         mode = directive.params.get("mode", "robin")
         if mode not in ("robin", "point"):
             raise ValueError(

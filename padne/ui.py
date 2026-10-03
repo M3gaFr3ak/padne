@@ -959,7 +959,7 @@ def collect_contact_coverage(problem: solver.problem.Problem,
     if not entries:
         # Preview fallback: refinement regions, coloured by a connection inside.
         regions_by_layer: dict[str, list] = {}
-        for layer_name, region_shape in getattr(problem, "refinement_regions", []):
+        for layer_name, region_shape in problem.refinement_regions:
             regions_by_layer.setdefault(layer_name, []).append(region_shape)
         if not regions_by_layer:
             return {}

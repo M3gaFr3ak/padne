@@ -2,16 +2,19 @@
 """
 Reproducible convergence example for the distributed SMD area contact.
 
-A 1 A current is forced through a 2x2 mm SMD pad on a 10x5 mm copper plane, once
-with the legacy *point* coupling (the lumped element binds to the pad centre
-vertex) and once with the distributed *area contact* (Robin over the pad
-footprint). The script sweeps the global mesh size and prints, for each model:
+A 260 A current is forced through a 5x5 mm SMD pad on a 16x8 mm copper plane,
+once with the legacy *point* coupling (the lumped element binds to the pad
+centre vertex) and once with the distributed *area contact* (Robin over the pad
+footprint). The script sweeps the mesh size and prints, for each model:
 
     h        pad in-plane power P [W]     peak J [A/mm^2]     cut current [A]
 
 Expected: the point model's power/peak grow without bound as h -> 0 (a numerical
 artifact, padne issue #77), while the distributed contact converges (pad power
-is within 5% between the last two mesh sizes).
+is within 5% between the two finest meshes) and still conducts the full current.
+`layer_cut_current` is sink-positive, so the sign says which terminal sources vs
+sinks; here the pad is the source, so it reads -260 A and the magnitude is the
+through-current.
 
 Run (needs the built CGAL extension, no KiCad/pcbnew):
 
@@ -129,7 +132,7 @@ def main():
     # The distributed contact must still conduct the full current; the tight
     # contour is a fixed multiple of the element size, so check the finest mesh.
     finest = rows[("robin", hs[0])][2]
-    assert abs(finest - CURRENT) / CURRENT < 0.05, finest
+    assert abs(abs(finest) - CURRENT) / CURRENT < 0.05, finest
 
 
 if __name__ == "__main__":

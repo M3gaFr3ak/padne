@@ -35,7 +35,10 @@ class SolverWarning(Warning):
 class SolverInfo:
     """Diagnostic information from the solver."""
     ground_node_current: float  # Should be ~0 for well-posed problems
-    residual_norm: float        # ||L @ v - r||, should be ~0 for solved systems
+    residual_norm: float        # ||L @ v - r|| (absolute), ~0 for solved systems
+    # ||L @ v - r|| / (||L @ v|| + ||r||); scale-independent, so it is the
+    # meaningful solve-quality monitor across problems of very different size.
+    residual_relative: float = 0.0
 
 
 @dataclass
@@ -188,20 +191,24 @@ def layer_cut_current(solution: Solution,
     Net in-plane current (A) flowing *into* the vertices inside `region` on
     `solution.problem.layers[layer_index]`.
 
-    This is the discrete divergence theorem applied to the per-mesh cotangent
-    Laplacian (scaled by the layer's sheet conductance): for the set S of
-    vertices inside `region`, `sum_{i in S} (L @ V)_i` is the net in-plane
-    current *leaving* S, so the inflow is its negation. By continuity this
-    equals the total vertical extraction inside S, independently of the
-    contact stamp (no terminal voltage needed). Across a contour that encloses
-    a contact it equals the through-current; across an interior contour it is
-    the partial extraction, so nested contours accumulate monotonically to the
-    full current.
+    Discrete divergence theorem on the per-mesh cotangent Laplacian (scaled by
+    the layer's sheet conductance): `(L @ V)_i` is the net in-plane current into
+    vertex i, so `sum_{i in S} (L @ V)_i` over the vertices S inside `region` is
+    the net in-plane inflow across the boundary of S. By continuity that equals
+    the total vertical current *extracted* from S (a contact that draws current
+    out of the copper), independently of the contact stamp and without needing
+    the terminal voltage.
 
-    Positive means current flows into the region. Meshes with no vertices
-    inside the region contribute nothing. The region must not contain a
-    network current source/sink: the injected current lives in the system
-    right-hand side, so it is invisible to the in-plane Laplacian alone.
+    **Positive means S is a net sink** (draws current out of the copper); a net
+    source reads negative. So a pad that conducts `I` out of the copper reads
+    `+I`, and the two terminals of a series element read equal and opposite.
+    Across an interior contour this is the partial extraction, so nested
+    contours accumulate monotonically toward the full through-current.
+
+    Meshes with no vertices inside the region contribute nothing. The region
+    must not contain a network current source/sink: the injected current lives
+    in the system right-hand side, so it is invisible to the in-plane Laplacian
+    alone.
 
     Note the contact spreads onto vertices of rim triangles just outside the
     pad polygon, so a contour exactly on (or barely outside) the pad edge
@@ -220,7 +227,7 @@ def layer_cut_current(solution: Solution,
             continue
         residual = conductance * (laplace_operator(msh).tocsr() @ potential.values)
         total += float(residual[inside].sum())
-    return -total
+    return total
 
 
 @dataclass
@@ -301,7 +308,7 @@ def effective_pad_refine_size(config: mesh.Mesher.Config,
     """
     if config.pad_refine_size > 0:
         return config.pad_refine_size
-    auto = getattr(prob, "pad_refine_size", 0.0)
+    auto = prob.pad_refine_size
     if auto <= 0:
         return 0.0
     return max(config.pad_refine_min_size, auto)
@@ -1035,10 +1042,14 @@ def solve_system(L: scipy.sparse.spmatrix,
     L_csc = L.tocsc()
     v = scipy.sparse.linalg.spsolve(L_csc, r)
 
-    residual_norm = np.linalg.norm(L_csc @ v - r)
+    residual = L_csc @ v - r
+    residual_norm = np.linalg.norm(residual)
+    scale = np.linalg.norm(L_csc @ v) + np.linalg.norm(r)
+    residual_relative = residual_norm / scale if scale > 0 else 0.0
     solver_info = SolverInfo(
         ground_node_current=float(v[-1]),  # Force a float for deterministic pickling reasons
         residual_norm=float(residual_norm),
+        residual_relative=float(residual_relative),
     )
     return v, solver_info
 
