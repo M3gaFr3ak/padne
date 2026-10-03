@@ -29,6 +29,7 @@ import shapely.geometry
 from scipy.spatial import cKDTree
 
 from . import mesh, solver, units, colormaps
+from .context import stage_timer
 
 # In this file, there are some cursed naming conventions due to the fact
 # that we are mixing Python and Qt together.
@@ -1129,8 +1130,13 @@ class MeshViewer(QOpenGLWidget):
                     )
                 )
 
-            # Do this _after_ starting the background tasks
-            # TODO: Eventually, we might want to do this in the background as well
+            # Resolve the preparation now. It runs before the window is shown
+            # (see `prepare_ui_data`), so there is no UI to keep responsive and
+            # the cost is attributed to the caller's timing stage.
+            for layer in self.solution.problem.layers:
+                self._prepared_rendered_meshes[layer.name]
+                self._prepared_disconnected_rendered_meshes[layer.name]
+
             self._build_spatial_indices()
 
         def _prepare_rendered_meshes_for_layer(self, layer_name) -> list[RenderedMesh.PreparedData]:
@@ -1356,7 +1362,16 @@ class MeshViewer(QOpenGLWidget):
     # Signal for visibility changes
     visibilityChanged = Signal()
 
-    def __init__(self, parent=None):
+    @classmethod
+    def default_modes(cls) -> list["MeshViewer.BaseRenderingMode"]:
+        """The rendering modes in menu order, constructible without a widget."""
+        return [
+            cls.VoltageRenderingMode(),
+            cls.PowerDensityRenderingMode(),
+            cls.CurrentDensityRenderingMode(),
+        ]
+
+    def __init__(self, parent=None, prepared=None):
         super().__init__(parent)
         self.solution: None | solver.Solution = None
         # Layer name -> RenderedMesh
@@ -1364,13 +1379,14 @@ class MeshViewer(QOpenGLWidget):
         self.rendered_connection_points: dict[str, RenderedPoints] = {}
         self.connection_points_visible: bool = True
 
-        # Rendering modes and current mode tracking
-        self.modes = [
-            self.VoltageRenderingMode(),
-            self.PowerDensityRenderingMode(),
-            self.CurrentDensityRenderingMode(),
-        ]
+        # Rendering modes and current mode tracking. When `prepared` is given,
+        # its modes already carry the GL-free prepared data (spatial indices +
+        # render arrays), so we reuse them instead of rebuilding.
+        self._prepared = prepared
+        self.modes = prepared.modes if prepared is not None else self.default_modes()
         self.current_mode_index = 0  # Start with voltage mode
+        # SMT contact coverage precomputed by prepare_ui_data (GL-free).
+        self._contact_coverage = None
 
         # When set, the colour maximum is capped to COLOR_SCALE_PERCENTILE of
         # the values on the current layer (rather than the global autoscale).
@@ -1541,7 +1557,14 @@ class MeshViewer(QOpenGLWidget):
 
     @Slot(solver.Solution)
     def setSolution(self, solution: solver.Solution):
-        """Set the solution for the mesh viewer."""
+        """Install a solution whose GL-free preparation is already done."""
+        # Reuse the modes prepared by `prepare_ui_data` when available;
+        # otherwise (direct `ui.main` callers, tests) prepare here.
+        prepared = self._prepared if self._prepared is not None \
+            else prepare_ui_data(solution)
+        self._prepared = None
+        self.modes = prepared.modes
+        self._contact_coverage = prepared.contact_coverage
         self.solution = solution
 
         # Initialize the list of layers from the solution
@@ -1558,11 +1581,6 @@ class MeshViewer(QOpenGLWidget):
 
         # Initialize all modes and emit mode signals
         current_mode = self.current_rendering_mode
-
-        # Initialize all modes with solution data (spatial indices + rendered meshes)
-        for mode in self.modes:
-            mode.set_solution(solution)
-            mode.autoscale_values(solution)
 
         # Emit mode-related signals
         self.currentModeChanged.emit(current_mode.name)
@@ -1611,9 +1629,13 @@ class MeshViewer(QOpenGLWidget):
                 points_by_layer[layer_name].append((point_coords, color))
 
         # Expand SMT contact regions into per-vertex coverage so SMD pads are
-        # marked like THT rim connections.
-        for layer_name, coverage_points in collect_contact_coverage(
-                self.solution.problem, self.solution.layer_solutions).items():
+        # marked like THT rim connections. Prefer the coverage precomputed in
+        # prepare_ui_data; fall back to computing it here (direct ui.main use).
+        coverage = self._contact_coverage
+        if coverage is None:
+            coverage = collect_contact_coverage(
+                self.solution.problem, self.solution.layer_solutions)
+        for layer_name, coverage_points in coverage.items():
             points_by_layer.setdefault(layer_name, []).extend(coverage_points)
 
         for layer_name, collected_points_data in points_by_layer.items():
@@ -2487,11 +2509,38 @@ class ColorScaleWidget(QWidget):
             )
 
 
+@dataclass
+class PreparedUI:
+    """GL-free UI preparation for a solution (see `prepare_ui_data`)."""
+
+    modes: list
+    contact_coverage: dict = field(default_factory=dict)
+
+
+@stage_timer
+def prepare_ui_data(solution: solver.Solution) -> PreparedUI:
+    """
+    Build the GL-free UI data for `solution`: per-mode spatial indices, the
+    prepared render arrays, and the SMT contact coverage.
+
+    Pure Python/numpy -- it never touches Qt or the OpenGL context, so it can
+    run before the window exists. The GL side (VAO upload, shader compilation)
+    still happens later, on the render thread.
+    """
+    modes = MeshViewer.default_modes()
+    for mode in modes:
+        mode.set_solution(solution)
+        mode.autoscale_values(solution)
+    coverage = collect_contact_coverage(solution.problem, solution.layer_solutions)
+    return PreparedUI(modes=modes, contact_coverage=coverage)
+
+
 class MainWindow(QMainWindow):
 
     projectLoaded = Signal(solver.Solution)
 
-    def __init__(self, solution: solver.Solution, warnings_list: Optional[list[warnings.WarningMessage]] = None):
+    def __init__(self, solution: solver.Solution, warnings_list: Optional[list[warnings.WarningMessage]] = None,
+                 prepared: Optional[PreparedUI] = None):
         super().__init__()
 
         self.project_file_name = solution.problem.project_name or "unknown"
@@ -2509,7 +2558,7 @@ class MainWindow(QMainWindow):
         main_layout.setSpacing(0)
 
         # Create the mesh viewer
-        self.mesh_viewer = MeshViewer(self)
+        self.mesh_viewer = MeshViewer(self, prepared=prepared)
 
         # Create ToolManager
         self.tool_manager = ToolManager(self.mesh_viewer, self)
@@ -2648,8 +2697,14 @@ def configure_opengl() -> None:
     QSurfaceFormat.setDefaultFormat(gl_format)
 
 
-def main(solution: solver.Solution, warnings_list: Optional[list[warnings.WarningMessage]] = None) -> int:
-    """Main entry point for the UI application."""
+def main(solution: solver.Solution, warnings_list: Optional[list[warnings.WarningMessage]] = None,
+         prepared: Optional[PreparedUI] = None) -> int:
+    """Main entry point for the UI application.
+
+    `prepared` is the result of `prepare_ui_data(solution)`. Passing it lets a
+    caller (the CLI) run the expensive, GL-free preparation as a timed stage
+    before the window is created; when omitted it is computed here.
+    """
     # Configure OpenGL
     configure_opengl()
 
@@ -2657,7 +2712,7 @@ def main(solution: solver.Solution, warnings_list: Optional[list[warnings.Warnin
         warnings_list = []
 
     app = QApplication(sys.argv)
-    window = MainWindow(solution, warnings_list)
+    window = MainWindow(solution, warnings_list, prepared=prepared)
 
     window.show()
     return app.exec()
