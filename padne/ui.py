@@ -932,6 +932,78 @@ class RenderedPoints:
             gl.glDrawArrays(gl.GL_POINTS, 0, self.point_count)
 
 
+def collect_contact_coverage(problem: solver.problem.Problem,
+                             layer_solutions: list[solver.LayerSolution]
+                             ) -> dict[str, list[tuple[tuple[float, float],
+                                                       tuple[float, float, float]]]]:
+    """
+    Compute per-layer point coverage for SMT contact regions.
+
+    Every mesh vertex that lies inside a contact/refinement region is returned,
+    coloured by the network that references the pad: red for networks with a
+    source, gray otherwise. This mirrors how THT pads are marked by their rim
+    connection points.
+    """
+    regions_by_layer: dict[str, list] = {}
+    for layer_name, region_shape in getattr(problem, "refinement_regions", []):
+        regions_by_layer.setdefault(layer_name, []).append(region_shape)
+
+    if not regions_by_layer:
+        return {}
+
+    # Colour each region by the network of a connection that lies inside it
+    # (pad-centre connections). Red wins over gray if several match.
+    region_colors: dict[str, list[Optional[tuple[float, float, float]]]] = {
+        layer_name: [None] * len(shapes)
+        for layer_name, shapes in regions_by_layer.items()
+    }
+    for network in problem.networks:
+        color = (1.0, 0.0, 0.0) if network.has_source else (0.5, 0.5, 0.5)
+        for connection in network.connections:
+            shapes = regions_by_layer.get(connection.layer.name)
+            if not shapes:
+                continue
+            for index, region_shape in enumerate(shapes):
+                if not region_shape.contains(connection.point):
+                    continue
+                if region_colors[connection.layer.name][index] is None or color[0] == 1.0:
+                    region_colors[connection.layer.name][index] = color
+
+    coverage: dict[str, list] = {}
+    for layer, layer_solution in zip(problem.layers, layer_solutions):
+        shapes = regions_by_layer.get(layer.name)
+        if not shapes:
+            continue
+
+        coords = [
+            (vertex.p.x, vertex.p.y)
+            for msh in layer_solution.meshes
+            for vertex in msh.vertices
+        ]
+        if not coords:
+            continue
+        points = np.asarray(coords)
+
+        for index, region_shape in enumerate(shapes):
+            color = region_colors[layer.name][index]
+            if color is None:
+                color = (0.5, 0.5, 0.5)
+            min_x, min_y, max_x, max_y = region_shape.bounds
+            box_mask = (
+                (points[:, 0] >= min_x) & (points[:, 0] <= max_x) &
+                (points[:, 1] >= min_y) & (points[:, 1] <= max_y)
+            )
+            if not box_mask.any():
+                continue
+            candidates = points[box_mask]
+            inside = shapely.contains_xy(region_shape, candidates[:, 0], candidates[:, 1])
+            layer_points = coverage.setdefault(layer.name, [])
+            for x, y in candidates[inside]:
+                layer_points.append(((float(x), float(y)), color))
+
+    return coverage
+
+
 class MeshViewer(QOpenGLWidget):
 
     @dataclass
@@ -1460,6 +1532,12 @@ class MeshViewer(QOpenGLWidget):
                 # Append a tuple of (coordinates, color)
                 points_by_layer[layer_name].append((point_coords, color))
 
+        # Expand SMT contact regions into per-vertex coverage so SMD pads are
+        # marked like THT rim connections.
+        for layer_name, coverage_points in collect_contact_coverage(
+                self.solution.problem, self.solution.layer_solutions).items():
+            points_by_layer.setdefault(layer_name, []).extend(coverage_points)
+
         for layer_name, collected_points_data in points_by_layer.items():
             if not collected_points_data:
                 continue
@@ -1467,6 +1545,16 @@ class MeshViewer(QOpenGLWidget):
             # so we draw them _last_. This is a hack to order them, it
             # depends on the fact that (1.0, 0.0, 0.0) > (0.5, 0.5, 0.5)
             # _This will break if the colors change!_
+            # Deduplicate exact (coordinates, colour) duplicates, e.g. the pad
+            # centre connection also appearing as a region vertex.
+            seen = set()
+            deduplicated = []
+            for point_data in collected_points_data:
+                if point_data in seen:
+                    continue
+                seen.add(point_data)
+                deduplicated.append(point_data)
+            collected_points_data = deduplicated
             collected_points_data.sort(key=lambda x: x[1])
             # Pass the list of (coordinates, color) tuples
             rendered_obj = RenderedPoints.from_points(collected_points_data)
