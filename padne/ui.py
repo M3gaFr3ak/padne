@@ -9,7 +9,7 @@ import OpenGL.GL as gl
 import time
 import concurrent.futures
 
-from typing import Optional, ClassVar
+from typing import Optional, ClassVar, Callable
 from dataclasses import dataclass, field
 
 import abc
@@ -20,7 +20,7 @@ from PySide6.QtOpenGL import QOpenGLShaderProgram, QOpenGLShader
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QLabel, QHBoxLayout,
-    QToolBar, QToolButton, QMenu, QMessageBox, QLineEdit
+    QToolBar, QToolButton, QMenu, QMessageBox, QLineEdit, QSlider
 )
 from PySide6.QtCore import QTimer
 
@@ -199,8 +199,14 @@ class BaseSpatialIndex:
         raise NotImplementedError("This method should be implemented in subclasses")
 
     @classmethod
-    def from_layer_data(cls, layer: solver.problem.Layer, layer_solution: solver.LayerSolution) -> "BaseSpatialIndex":
+    def from_layer_data(cls, layer: solver.problem.Layer,
+                        layer_solution: solver.LayerSolution,
+                        value_transform: Optional[Callable[[float], float]] = None
+                        ) -> "BaseSpatialIndex":
         vertices, values = cls._extract_points_and_values(layer_solution)
+
+        if value_transform is not None:
+            values = [value_transform(value) for value in values]
 
         # cKDTree is not happy with empty arrays, so we just return an empty index
         if not vertices:
@@ -935,6 +941,9 @@ class MeshViewer(QOpenGLWidget):
         color_map: colormaps.UniformColorMap
         min_value: float = 0.0
         max_value: float = 1.0
+        # Value at the last autoscale; the max-scale slider is expressed as a
+        # fraction of this so it stays meaningful while max_value is edited.
+        full_scale_max: float = 1.0
         solution: Optional[solver.Solution] = None
         spatial_indices: dict[str, BaseSpatialIndex] = field(default_factory=dict)
 
@@ -970,6 +979,7 @@ class MeshViewer(QOpenGLWidget):
         def autoscale_values(self, solution: solver.Solution):
             """Autoscale values for the rendering mode."""
             self.min_value, self.max_value = self._compute_min_max()
+            self.full_scale_max = self.max_value
 
         def _build_spatial_indices(self):
             raise NotImplementedError("This method should be implemented in subclasses")
@@ -1141,8 +1151,65 @@ class MeshViewer(QOpenGLWidget):
                     prepared_meshes.append(RenderedMesh.prepare_two_form(msh, values))
             return prepared_meshes
 
+    @dataclass
+    class CurrentDensityRenderingMode(PowerDensityRenderingMode):
+        unit: str = "A/mm²"
+        name: str = "Current Density"
+        color_map: colormaps.UniformColorMap = colormaps.VIRIDIS
+
+        # Layers already warned about a missing thickness, to avoid log spam
+        _warned_missing_thickness: set[str] = field(default_factory=set)
+
+        def _current_density_factor(self, layer: solver.problem.Layer) -> float:
+            """
+            Factor c such that |J| = c * sqrt(power_density), with J in A/mm².
+
+            The solver works with sheet conductance (sigma * thickness), while
+            J = sigma * E is a bulk quantity. Since P = conductance * E², we get
+            |J| = sqrt(conductance * P) / thickness.
+            """
+            thickness = getattr(layer, "thickness", None)
+            if not thickness:
+                # Synthetic or legacy (pre-thickness) problems. Fall back to
+                # treating the sheet conductance as bulk; this is off by
+                # 1/thickness but keeps the UI usable instead of crashing.
+                if layer.name not in self._warned_missing_thickness:
+                    self._warned_missing_thickness.add(layer.name)
+                    log.warning(
+                        "Layer %s has no thickness; current density is shown as "
+                        "sheet current despite the A/mm² unit.", layer.name)
+                return float(np.sqrt(layer.conductance))
+            return float(np.sqrt(layer.conductance) / thickness)
+
+        def _build_spatial_indices(self):
+            """Build spatial indices for fast face lookups."""
+            self.spatial_indices.clear()
+            for layer, layer_solution in zip(self.solution.problem.layers,
+                                             self.solution.layer_solutions):
+                factor = self._current_density_factor(layer)
+                spatial_index = FaceSpatialIndex.from_layer_data(
+                    layer, layer_solution,
+                    value_transform=lambda value, factor=factor: factor * np.sqrt(max(value, 0.0)))
+                self.spatial_indices[layer.name] = spatial_index
+
+        def _prepare_rendered_meshes_for_layer(self, layer_name: str) -> list[RenderedMesh.PreparedData]:
+            """Create RenderedMesh objects for a specific layer."""
+            prepared_meshes = []
+            for layer, layer_solution in zip(self.solution.problem.layers,
+                                             self.solution.layer_solutions):
+                if layer.name != layer_name:
+                    continue
+                factor = self._current_density_factor(layer)
+                for msh, values in zip(layer_solution.meshes, layer_solution.power_densities):
+                    current_density = mesh.TwoForm(msh)
+                    current_density.values[:] = factor * np.sqrt(np.maximum(0.0, values.values))
+                    prepared_meshes.append(RenderedMesh.prepare_two_form(msh, current_density))
+            return prepared_meshes
+
     # Signal to notify when the value range changes
     valueRangeChanged = Signal(float, float)
+    # Signal to notify when the full-scale (autoscale) maximum changes
+    fullScaleChanged = Signal(float)
     # Signal to notify when the current layer changes
     currentLayerChanged = Signal(str)
     # Signal to notify when the list of available layers changes
@@ -1173,7 +1240,8 @@ class MeshViewer(QOpenGLWidget):
         # Rendering modes and current mode tracking
         self.modes = [
             self.VoltageRenderingMode(),
-            self.PowerDensityRenderingMode()
+            self.PowerDensityRenderingMode(),
+            self.CurrentDensityRenderingMode(),
         ]
         self.current_mode_index = 0  # Start with voltage mode
 
@@ -1277,6 +1345,7 @@ class MeshViewer(QOpenGLWidget):
 
         # Emit signal to notify about the new value range
         self.valueRangeChanged.emit(self.current_rendering_mode.min_value, self.current_rendering_mode.max_value)
+        self.fullScaleChanged.emit(self.current_rendering_mode.full_scale_max)
         self.update()
 
     def autoscaleXY(self) -> None:
@@ -1349,6 +1418,7 @@ class MeshViewer(QOpenGLWidget):
         self.valueRangeChanged.emit(
             self.current_rendering_mode.min_value, self.current_rendering_mode.max_value
         )
+        self.fullScaleChanged.emit(self.current_rendering_mode.full_scale_max)
 
         # We can't just do autoscaleXY here, since we may be in some
         # semi-initialized state and the widget may not have reached a valid
@@ -1903,6 +1973,7 @@ class MeshViewer(QOpenGLWidget):
             self.unitChanged.emit(mode.unit)
             self.colorMapChanged.emit(mode.color_map)
             self.valueRangeChanged.emit(self.current_rendering_mode.min_value, self.current_rendering_mode.max_value)
+            self.fullScaleChanged.emit(self.current_rendering_mode.full_scale_max)
             self.update()
 
     def _updateShaderColorMap(self) -> None:
@@ -2006,6 +2077,7 @@ class ColorScaleWidget(QWidget):
         super().__init__(parent)
         self.v_min = 0.0
         self.v_max = 1.0
+        self.full_scale_max = 1.0  # Last autoscaled maximum, for the slider
         self.unit = "V"  # Default unit
         self.color_map = colormaps.PLASMA  # Default color map
 
@@ -2015,6 +2087,7 @@ class ColorScaleWidget(QWidget):
         self.delta_label: Optional[QLabel] = None
         self.max_label: Optional[EditableValueLabel] = None
         self.min_label: Optional[EditableValueLabel] = None
+        self.max_slider: Optional[QSlider] = None
 
         self.setupUI()
 
@@ -2052,13 +2125,45 @@ class ColorScaleWidget(QWidget):
         self.min_label.valueEdited.connect(self.minValueEdited)
         layout.addWidget(self.min_label)
 
+        # Slider to scale the colour maximum relative to the autoscaled
+        # full-scale value (100% = full range).
+        self.max_slider = QSlider(Qt.Horizontal, self)
+        self.max_slider.setRange(0, 1000)
+        self.max_slider.setValue(1000)
+        self.max_slider.setToolTip("Maximum colour scale value, relative to full scale")
+        self.max_slider.valueChanged.connect(self._onMaxSliderChanged)
+        layout.addWidget(self.max_slider)
+
     @Slot(float, float)
     def setRange(self, v_min, v_max):
         """Set the minimum and maximum values for the scale."""
         self.v_min = v_min
         self.v_max = v_max
         self.updateLabels()
+        self._syncMaxSlider()
         self.update()
+
+    @Slot(float)
+    def setFullScaleMax(self, value: float) -> None:
+        """Set the full-scale maximum the slider is relative to."""
+        self.full_scale_max = value if value > 0 else 1.0
+        self._syncMaxSlider()
+
+    def _syncMaxSlider(self) -> None:
+        """Reflect the current v_max on the slider without re-emitting."""
+        if self.max_slider is None or self.full_scale_max <= 0:
+            return
+        fraction = max(0.0, min(1.0, self.v_max / self.full_scale_max))
+        self.max_slider.blockSignals(True)
+        self.max_slider.setValue(int(round(fraction * self.max_slider.maximum())))
+        self.max_slider.blockSignals(False)
+
+    @Slot(int)
+    def _onMaxSliderChanged(self, value: int) -> None:
+        """Emit a new colour-scale maximum from the slider position."""
+        if self.max_slider is None or self.full_scale_max <= 0:
+            return
+        self.maxValueEdited.emit(self.full_scale_max * value / self.max_slider.maximum())
 
     @Slot(str)
     def setUnit(self, unit):
@@ -2216,6 +2321,7 @@ class MainWindow(QMainWindow):
     def _connectSignals(self) -> None:
         # Connect the MeshViewer
         self.mesh_viewer.valueRangeChanged.connect(self.color_scale.setRange)
+        self.mesh_viewer.fullScaleChanged.connect(self.color_scale.setFullScaleMax)
         self.mesh_viewer.unitChanged.connect(self.color_scale.setUnit)
         self.mesh_viewer.colorMapChanged.connect(self.color_scale.setColorMap)
         self.color_scale.minValueEdited.connect(self.mesh_viewer.setMinValue)
