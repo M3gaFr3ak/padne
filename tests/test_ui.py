@@ -2,7 +2,7 @@ import pytest
 import shapely.geometry
 
 from padne import mesh, problem, solver
-from padne.ui import VertexSpatialIndex, FaceSpatialIndex, collect_contact_coverage
+from padne.ui import VertexSpatialIndex, FaceSpatialIndex, collect_contact_coverage, MeshViewer
 
 
 class TestSpatialIndex:
@@ -209,3 +209,28 @@ class TestContactCoverage:
         prob, layer_solutions, _ = self._make_problem_and_solution(has_source=True)
         no_regions = problem.Problem(layers=prob.layers, networks=prob.networks)
         assert collect_contact_coverage(no_regions, layer_solutions) == {}
+
+
+class TestCurrentDensityUnit:
+    """The current-density mode's unit must match the quantity it shows."""
+
+    def _unit_for(self, thickness):
+        layer = problem.Layer(
+            shape=shapely.geometry.MultiPolygon([shapely.geometry.box(0, 0, 1, 1)]),
+            name="F.Cu", conductance=2082.0, thickness=thickness)
+        layer_solution = solver.LayerSolution(
+            meshes=[], potentials=[], power_densities=[], disconnected_meshes=[])
+        solution = solver.Solution(
+            problem=problem.Problem(layers=[layer], networks=[]),
+            layer_solutions=[layer_solution],
+            solver_info=solver.SolverInfo(ground_node_current=0.0, residual_norm=0.0),
+        )
+        mode = MeshViewer.CurrentDensityRenderingMode()
+        mode.set_solution(solution)
+        return mode.unit
+
+    def test_unit_a_per_mm2_with_thickness(self):
+        assert self._unit_for(0.035) == "A/mm²"
+
+    def test_unit_a_per_mm_without_thickness(self):
+        assert self._unit_for(None) == "A/mm"

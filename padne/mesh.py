@@ -1,4 +1,5 @@
 
+import logging
 import numpy as np
 import shapely.geometry
 import padne._cgal as cgal
@@ -9,6 +10,8 @@ from typing import Optional, Iterator
 
 # The purpose of this module is to generate triangular meshes from Shapely
 # (multi)polygons
+
+log = logging.getLogger(__name__)
 
 index_type = np.uint32
 
@@ -593,7 +596,9 @@ class Mesher:
             poly: A Shapely polygon, potentially with holes
             seed_points: Additional seed points to include
             refinement_regions: (polygon, target edge length) pairs that force
-                local mesh refinement, e.g. SMD pads
+                local mesh refinement, e.g. SMD pads. These are always applied;
+                `pad_refine_size` is NOT consulted here — the caller gates.
+                Non-positive sizes are dropped with a warning.
 
         Returns:
             A Mesh object representing the triangulated polygon
@@ -602,8 +607,16 @@ class Mesher:
 
         vertices, segments, seeds = self._prepare_polygon_for_cgal(poly, seed_points)
 
-        region_polygons = [region for region, _ in refinement_regions]
-        region_sizes = [size for _, size in refinement_regions]
+        region_polygons = []
+        region_sizes = []
+        for region, size in refinement_regions:
+            if size <= 0:
+                # Contract: explicit regions are always used; non-positive
+                # sizes are dropped with a warning rather than silently ignored.
+                log.warning("Dropping refinement region with non-positive size %s", size)
+                continue
+            region_polygons.append(region)
+            region_sizes.append(size)
 
         try:
             # Create distance map for variable density meshing only if enabled

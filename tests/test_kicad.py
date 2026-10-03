@@ -276,6 +276,51 @@ class TestPadFinder:
         centre = shapely.geometry.Point(pcbnew.ToMM(position.x), pcbnew.ToMM(position.y))
         assert polygon.intersects(centre)
 
+    def test_shape_poly_set_to_shapely_with_hole(self):
+        ps = pcbnew.SHAPE_POLY_SET()
+        ps.NewOutline()
+        for x, y in [(0, 0), (10, 0), (10, 10), (0, 10)]:
+            ps.Append(pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(y)), 0, -1)
+        ps.NewHole(0)
+        for x, y in [(4, 4), (6, 4), (6, 6), (4, 6)]:
+            ps.Append(pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(y)), 0, 0)
+
+        result = kicad.shape_poly_set_to_shapely(ps)
+        assert result.geom_type == "MultiPolygon"
+        assert len(result.geoms) == 1
+        polygon = result.geoms[0]
+        assert len(polygon.interiors) == 1
+        assert polygon.area == pytest.approx(100.0 - 4.0)
+
+    def test_flipped_pad_polygon_extraction(self, kicad_test_projects):
+        """Flipped-footprint SMD outlines are extracted on the flipped layer."""
+        project = kicad_test_projects["via_tht_4layer"]
+        board = pcbnew.LoadBoard(str(project.pcb_path))
+        _, pad_index = Utils.setup_layer_dict_and_pad_index(board)
+
+        checked = 0
+        for footprint in board.GetFootprints():
+            if not footprint.IsFlipped():
+                continue
+            for pad in footprint.Pads():
+                if pad.GetAttribute() != pcbnew.PAD_ATTRIB_SMD:
+                    continue
+                endpoint = kicad.Endpoint(footprint.GetReference(), pad.GetName())
+                shapes = pad_index.find_shapes_by_endpoint(endpoint)
+                assert len(shapes) == 1
+                layer_name, polygon = shapes[0]
+                assert layer_name == "B.Cu"
+                bbox = pad.GetBoundingBox()
+                expected = (
+                    pcbnew.ToMM(bbox.GetX()),
+                    pcbnew.ToMM(bbox.GetY()),
+                    pcbnew.ToMM(bbox.GetX() + bbox.GetWidth()),
+                    pcbnew.ToMM(bbox.GetY() + bbox.GetHeight()),
+                )
+                assert polygon.bounds == pytest.approx(expected, abs=0.02)
+                checked += 1
+        assert checked > 0, "expected flipped SMD pads in via_tht_4layer"
+
 
 class TestViaSpecs:
 

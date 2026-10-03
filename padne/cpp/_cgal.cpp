@@ -223,17 +223,16 @@ public:
             // Compute triangle centroid using helper method
             auto [cx, cy] = compute_triangle_centroid(pa, pb, pc);
 
-            // Compute distance to polygon boundary using distance map
-            double boundary_distance = distance_map_ptr ? distance_map_ptr->query(cx, cy) : 0.0;
-
-            // Compute effective size bound using piecewise linear scaling
-            double effective_size_bound = compute_effective_size_bound(boundary_distance);
-
-            // Explicit refinement regions (e.g. SMD pads) override the
-            // boundary-distance field when they ask for a smaller element.
-            double region_bound = refinement_size_bound(cx, cy, effective_size_bound);
-            if (region_bound < effective_size_bound) {
-                effective_size_bound = region_bound;
+            // Sample the size bound at the centroid AND the three vertices, so a
+            // face straddling a refinement region is split even when its
+            // centroid falls outside the region.
+            double effective_size_bound = sample_size_bound(cx, cy);
+            for (const Point& vertex : {pa, pb, pc}) {
+                double vertex_bound = sample_size_bound(
+                    CGAL::to_double(vertex.x()), CGAL::to_double(vertex.y()));
+                if (vertex_bound < effective_size_bound) {
+                    effective_size_bound = vertex_bound;
+                }
             }
 
             double squared_size_bound = effective_size_bound * effective_size_bound;
@@ -309,6 +308,15 @@ public:
             // Linear interpolation between min_distance and max_distance
             double t = (boundary_distance - min_distance) / (max_distance - min_distance);
             return base_size_bound * (1.0 + t * (size_factor - 1.0));
+        }
+
+        // Effective size bound at a point: the boundary-distance field capped by
+        // any explicit refinement region containing the point.
+        double sample_size_bound(double x, double y) const {
+            double boundary_distance = distance_map_ptr ? distance_map_ptr->query(x, y) : 0.0;
+            double base = compute_effective_size_bound(boundary_distance);
+            double region = refinement_size_bound(x, y, base);
+            return region < base ? region : base;
         }
 
         // Smallest target size among the explicit refinement regions that

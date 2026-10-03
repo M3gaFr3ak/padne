@@ -1229,29 +1229,40 @@ class MeshViewer(QOpenGLWidget):
         name: str = "Current Density"
         color_map: colormaps.UniformColorMap = colormaps.VIRIDIS
 
-        # Layers already warned about a missing thickness, to avoid log spam
-        _warned_missing_thickness: set[str] = field(default_factory=set)
+        # Set in set_solution: if any layer lacks a thickness, the whole mode
+        # falls back to sheet current (A/mm) so the single/global unit is honest.
+        _sheet_fallback: bool = False
+
+        def set_solution(self, solution: solver.Solution):
+            missing = [
+                layer.name for layer in solution.problem.layers
+                if not getattr(layer, "thickness", None)
+            ]
+            self._sheet_fallback = bool(missing)
+            if self._sheet_fallback:
+                self.unit = "A/mm"
+                log.warning(
+                    "Layer(s) %s have no thickness; current density is shown as "
+                    "sheet current (A/mm) for the whole mode.", ", ".join(missing))
+            else:
+                self.unit = "A/mm²"
+            super().set_solution(solution)
 
         def _current_density_factor(self, layer: solver.problem.Layer) -> float:
             """
-            Factor c such that |J| = c * sqrt(power_density), with J in A/mm².
+            Factor c such that |J| = c * sqrt(power_density).
 
-            The solver works with sheet conductance (sigma * thickness), while
-            J = sigma * E is a bulk quantity. Since P = conductance * E², we get
-            |J| = sqrt(conductance * P) / thickness.
+            With thickness: |J| = sqrt(conductance * P) / thickness (A/mm²).
+            Sheet fallback (any layer missing thickness): sqrt(conductance * P)
+            (A/mm).
             """
+            conductance = float(layer.conductance)
+            if self._sheet_fallback:
+                return float(np.sqrt(conductance))
             thickness = getattr(layer, "thickness", None)
             if not thickness:
-                # Synthetic or legacy (pre-thickness) problems. Fall back to
-                # treating the sheet conductance as bulk; this is off by
-                # 1/thickness but keeps the UI usable instead of crashing.
-                if layer.name not in self._warned_missing_thickness:
-                    self._warned_missing_thickness.add(layer.name)
-                    log.warning(
-                        "Layer %s has no thickness; current density is shown as "
-                        "sheet current despite the A/mm² unit.", layer.name)
-                return float(np.sqrt(layer.conductance))
-            return float(np.sqrt(layer.conductance) / thickness)
+                return float(np.sqrt(conductance))
+            return float(np.sqrt(conductance) / thickness)
 
         def _build_spatial_indices(self):
             """Build spatial indices for fast face lookups."""

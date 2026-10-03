@@ -406,10 +406,19 @@ class PadIndex:
 
                 # Record the exact pad outline on this layer. Used by the
                 # distributed area-contact model and by pad-aware refinement.
-                effective_polygon = pad_obj.GetEffectivePolygon(layer_id)
-                pad_shape = shape_poly_set_to_shapely(effective_polygon)
-                if not pad_shape.is_empty:
-                    self.shapes.setdefault(endpoint, []).append((layer_name, pad_shape))
+                # Extraction is best-effort: a pad whose outline cannot be
+                # obtained is simply not refined / not area-contacted.
+                try:
+                    effective_polygon = pad_obj.GetEffectivePolygon(layer_id)
+                    pad_shape = shape_poly_set_to_shapely(effective_polygon)
+                except Exception as exc:
+                    log.warning(
+                        "Could not extract the outline of SMD pad %s on layer %s (%s); "
+                        "it will not be refined or used as an area contact.",
+                        endpoint, layer_name, exc)
+                else:
+                    if not pad_shape.is_empty:
+                        self.shapes.setdefault(endpoint, []).append((layer_name, pad_shape))
 
                 # Add to mapping (initialize list if endpoint doesn't exist)
                 if endpoint not in self.mapping:
