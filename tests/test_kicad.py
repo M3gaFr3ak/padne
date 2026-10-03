@@ -3,6 +3,7 @@ import warnings
 # is not yet cooked enough for us
 warnings.simplefilter("ignore", DeprecationWarning)
 
+import math
 import pytest
 import pcbnew
 import shapely.geometry
@@ -1250,6 +1251,12 @@ class TestContactDirective:
         assert contacts, "expected area contacts on by default"
         assert all(c.mode == "robin" for c in contacts)
         assert result.pad_refine_size > 0
+        # The auto size is CONTACT_REFINE_LAMBDA_FACTOR extraction decay lengths.
+        sheet_conductance = max(layer.conductance for layer in result.layers)
+        decay_length = math.sqrt(
+            sheet_conductance / kicad.ContactSpec.default().conductance_per_area)
+        assert result.pad_refine_size == pytest.approx(
+            kicad.CONTACT_REFINE_LAMBDA_FACTOR * decay_length)
 
     def test_contacts_can_be_disabled(self, kicad_test_projects):
         project = kicad_test_projects["simple_geometry"]

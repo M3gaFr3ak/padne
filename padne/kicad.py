@@ -866,6 +866,13 @@ CONTACT_VOID_FRACTION = 0.10
 CONTACT_IMC_CONDUCTIVITY = 7e6        # S/m
 CONTACT_IMC_THICKNESS = 3e-6          # m, per side
 
+# Screening auto refinement size over contact pads: this many extraction decay
+# lengths (lambda = sqrt(s_sheet / g)). 2.0 is a screening default: it gets the
+# fringe localisation right but is ~15% off the integrated-power gate, which
+# needs an explicit `--pad-refine-size <~ lambda/2` override. See the CONTACT
+# docs / the plan (sec. 5.6).
+CONTACT_REFINE_LAMBDA_FACTOR = 2.0
+
 
 @dataclass(frozen=True)
 class ContactSpec:
@@ -1883,15 +1890,17 @@ def load_kicad_project(pro_file_path: pathlib.Path,
 
     layers = [layer_dict[name] for name in layer_names_in_order]
 
-    # Screening auto refinement over contact pads: ~2*lambda. This meets the
-    # integrated-power gate only approximately; the 5% gate needs a finer
-    # override (see the CONTACT docs).
+    # Screening auto refinement over contact pads: CONTACT_REFINE_LAMBDA_FACTOR
+    # extraction decay lengths. This meets the integrated-power gate only
+    # approximately; the 5% gate needs a finer --pad-refine-size override (see
+    # the CONTACT docs / the plan sec. 5.6). A lower floor is applied downstream
+    # (Mesher.Config.pad_refine_min_size).
     pad_refine_size = 0.0
     if contact_spec.enabled and layers:
         sheet_conductance = max(layer.conductance for layer in layers)
         if sheet_conductance > 0:
             decay_length = math.sqrt(sheet_conductance / contact_spec.conductance_per_area)
-            pad_refine_size = max(0.3, decay_length)
+            pad_refine_size = CONTACT_REFINE_LAMBDA_FACTOR * decay_length
 
     # Return the Problem object
     return problem.Problem(

@@ -248,6 +248,23 @@ def compute_connectivity(prob: problem.Problem
     return strtrees, cg, find_connected_layer_geom_indices(cg)
 
 
+def effective_pad_refine_size(config: mesh.Mesher.Config,
+                              prob: problem.Problem) -> float:
+    """
+    Target mesh edge length (mm) for contact-pad refinement.
+
+    An explicit `config.pad_refine_size` override is used verbatim (never
+    clamped). Otherwise the Problem's auto size applies, floored by
+    `config.pad_refine_min_size`; a Problem size of 0 stays disabled.
+    """
+    if config.pad_refine_size > 0:
+        return config.pad_refine_size
+    auto = getattr(prob, "pad_refine_size", 0.0)
+    if auto <= 0:
+        return 0.0
+    return max(config.pad_refine_min_size, auto)
+
+
 @stage_timer
 def generate_meshes_for_problem(prob: problem.Problem,
                                 mesher: mesh.Mesher,
@@ -263,11 +280,9 @@ def generate_meshes_for_problem(prob: problem.Problem,
     mesh_index_to_layer_index: list[int] = []
 
     # The CLI/config override wins; otherwise the Problem's screening default
-    # (computed from the contact conductance) applies.
-    effective_refine_size = (
-        mesher.config.pad_refine_size if mesher.config.pad_refine_size > 0
-        else getattr(prob, "pad_refine_size", 0.0)
-    )
+    # (computed from the contact conductance) applies, floored by the
+    # configured minimum so a very good joint cannot refine without bound.
+    effective_refine_size = effective_pad_refine_size(mesher.config, prob)
 
     for layer_i, layer in enumerate(prob.layers):
         seed_points_in_layer = collect_seed_points(prob, layer)

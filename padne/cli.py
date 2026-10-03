@@ -99,6 +99,14 @@ def add_mesher_args(parser: argparse.ArgumentParser) -> None:
         default=default_config.pad_refine_transition,
         help="Distance (mm) over which pad refinement relaxes into the pad interior"
     )
+    parser.add_argument(
+        "--pad-refine-min-size",
+        type=float,
+        default=default_config.pad_refine_min_size,
+        help="Floor (mm) for auto pad refinement; prevents runaway refinement "
+             "for very good joints. 0 disables. An explicit --pad-refine-size "
+             "is never clamped"
+    )
 
 
 def add_contact_args(parser: argparse.ArgumentParser) -> None:
@@ -140,6 +148,7 @@ def mesher_config_from_args(args: argparse.Namespace) -> padne.mesh.Mesher.Confi
         distance_map_quantization=args.distance_map_quantization,
         pad_refine_size=args.pad_refine_size,
         pad_refine_transition=args.pad_refine_transition,
+        pad_refine_min_size=args.pad_refine_min_size,
     )
 
 

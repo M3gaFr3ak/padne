@@ -640,6 +640,34 @@ class TestAreaContactModel:
         assert values[-1] < 1e-3
 
 
+class TestEffectivePadRefineSize:
+    """The auto/override/minimum-size contract for contact-pad refinement."""
+
+    def _prob(self, pad_refine_size):
+        return problem.Problem(layers=[], networks=[],
+                               pad_refine_size=pad_refine_size)
+
+    def test_explicit_override_is_never_clamped(self):
+        config = mesh.Mesher.Config(pad_refine_size=0.01, pad_refine_min_size=0.05)
+        assert solver.effective_pad_refine_size(config, self._prob(0.3)) == 0.01
+
+    def test_auto_size_is_floored_by_the_minimum(self):
+        config = mesh.Mesher.Config(pad_refine_min_size=0.05)
+        assert solver.effective_pad_refine_size(config, self._prob(0.02)) == 0.05
+
+    def test_auto_size_above_the_floor_is_untouched(self):
+        config = mesh.Mesher.Config(pad_refine_min_size=0.05)
+        assert solver.effective_pad_refine_size(config, self._prob(0.3)) == 0.3
+
+    def test_zero_auto_size_stays_disabled(self):
+        config = mesh.Mesher.Config(pad_refine_min_size=0.05)
+        assert solver.effective_pad_refine_size(config, self._prob(0.0)) == 0.0
+
+    def test_negative_minimum_size_is_rejected(self):
+        with pytest.raises(ValueError, match="pad_refine_min_size"):
+            mesh.Mesher.Config(pad_refine_min_size=-1.0)
+
+
 class TestSyntheticProblems:
 
     def test_linear_rectangle(self):
