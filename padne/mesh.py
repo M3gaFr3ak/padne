@@ -494,6 +494,10 @@ class Mesher:
         # Target edge length (mm) for explicit refinement regions such as SMD
         # pads. Zero disables region refinement.
         pad_refine_size: float = 0.0
+        # Distance (mm) over which a refinement region relaxes from its target
+        # size at the boundary to the background size in the interior
+        # (0 = uniform refinement over the whole region).
+        pad_refine_transition: float = 0.5
 
         # Static relaxed configuration for disconnected copper triangulation
         RELAXED = None  # Will be initialized after class definition
@@ -525,6 +529,9 @@ class Mesher:
 
             if self.pad_refine_size < 0:
                 raise ValueError(f"pad_refine_size must be non-negative, got {self.pad_refine_size}")
+
+            if self.pad_refine_transition < 0:
+                raise ValueError(f"pad_refine_transition must be non-negative, got {self.pad_refine_transition}")
 
     def __init__(self, config: Optional['Mesher.Config'] = None):
         self.config = config if config is not None else Mesher.Config()
@@ -606,7 +613,8 @@ class Mesher:
                 distance_map = None
 
             cgal_output = cgal.mesh(self.config, vertices, segments, seeds,
-                                    distance_map, region_polygons, region_sizes)
+                                    distance_map, region_polygons, region_sizes,
+                                    self.config.pad_refine_transition)
         except RuntimeError as e:
             # Re-raise as MeshingException to provide clearer error context
             raise MeshingException(str(e)) from e

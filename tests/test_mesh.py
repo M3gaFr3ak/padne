@@ -1685,7 +1685,8 @@ class TestMesher:
         square = shapely.geometry.box(0, 0, 10, 10)
         region = shapely.geometry.box(4, 4, 6, 6)
 
-        mesher = Mesher(Mesher.Config(maximum_size=0.6))
+        # Uniform refinement over the whole region (no grading).
+        mesher = Mesher(Mesher.Config(maximum_size=0.6, pad_refine_transition=0.0))
         base = mesher.poly_to_mesh(square)
         refined = mesher.poly_to_mesh(square, [], [(region, 0.15)])
 
@@ -1703,6 +1704,38 @@ class TestMesher:
         assert max_edge_inside(refined, inside) < 0.25
         assert max_edge_inside(base, inside) > max_edge_inside(refined, inside)
         assert len(refined.vertices) > len(base.vertices)
+
+    def test_refinement_regions_grade_toward_interior(self):
+        """With a transition, refinement is fine at the boundary, coarse inside."""
+        square = shapely.geometry.box(0, 0, 10, 10)
+        region = shapely.geometry.box(4, 4, 6, 6)
+        boundary = region.boundary
+
+        def max_edge_inside(msh, predicate):
+            longest = 0.0
+            for face in msh.faces:
+                centroid = face.centroid
+                if not predicate(centroid.x, centroid.y):
+                    continue
+                for edge in face.edges:
+                    longest = max(longest, edge.origin.p.distance(edge.next.origin.p))
+            return longest
+
+        def near_edge(x, y):
+            point = shapely.geometry.Point(x, y)
+            return region.contains(point) and boundary.distance(point) < 0.15
+
+        interior = lambda x, y: 4.7 <= x <= 5.3 and 4.7 <= y <= 5.3
+
+        graded = Mesher(Mesher.Config(maximum_size=0.6, pad_refine_transition=0.5)) \
+            .poly_to_mesh(square, [], [(region, 0.15)])
+        uniform = Mesher(Mesher.Config(maximum_size=0.6, pad_refine_transition=0.0)) \
+            .poly_to_mesh(square, [], [(region, 0.15)])
+
+        assert max_edge_inside(graded, near_edge) < 0.25
+        assert max_edge_inside(graded, interior) > max_edge_inside(uniform, interior)
+        # Grading leaves the interior coarse, so it needs fewer elements.
+        assert len(graded.vertices) < len(uniform.vertices)
 
     def test_seed_points_on_boundary(self):
         """Test behavior with seed points on the polygon boundary."""

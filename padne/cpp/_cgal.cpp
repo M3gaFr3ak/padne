@@ -98,6 +98,10 @@ public:
 struct RefinementRegion {
     const CGALPolygon* polygon;
     double size;
+    // Distance (mm) over which the target size relaxes from `size` at the
+    // region boundary to the boundary-distance bound in the interior.
+    // Zero means uniform refinement.
+    double transition;
 };
 
 // Variable density mesh size criteria implementation
@@ -227,7 +231,7 @@ public:
 
             // Explicit refinement regions (e.g. SMD pads) override the
             // boundary-distance field when they ask for a smaller element.
-            double region_bound = refinement_size_bound(cx, cy);
+            double region_bound = refinement_size_bound(cx, cy, effective_size_bound);
             if (region_bound < effective_size_bound) {
                 effective_size_bound = region_bound;
             }
@@ -308,15 +312,31 @@ public:
         }
 
         // Smallest target size among the explicit refinement regions that
-        // contain (x, y), or +inf when the point is in none of them.
-        double refinement_size_bound(double x, double y) const {
+        // contain (x, y), or +inf when the point is in none of them. Regions
+        // with a positive transition are graded: `size` at the region boundary,
+        // relaxing to `effective_bound` over `transition` mm into the interior.
+        double refinement_size_bound(double x, double y, double effective_bound) const {
             if (!refinement_regions) {
                 return std::numeric_limits<double>::infinity();
             }
             double bound = std::numeric_limits<double>::infinity();
             for (const auto& region : *refinement_regions) {
-                if (region.size < bound && region.polygon->contains(x, y)) {
-                    bound = region.size;
+                if (!region.polygon->contains(x, y)) {
+                    continue;
+                }
+                double candidate = region.size;
+                if (region.transition > 0.0) {
+                    // Keep the target size for one element width at the
+                    // boundary, then relax toward the boundary-distance bound
+                    // over `transition` mm into the interior.
+                    double d = region.polygon->distance_to_boundary(x, y);
+                    double hold = region.size;
+                    double t = d <= hold ? 0.0
+                                         : std::min(1.0, (d - hold) / region.transition);
+                    candidate = region.size + (effective_bound - region.size) * t;
+                }
+                if (candidate < bound) {
+                    bound = candidate;
                 }
             }
             return bound;
@@ -421,7 +441,8 @@ nb::dict mesh(const nb::object& py_config,
               const std::vector<std::pair<double, double>>& seeds,
               const PolyBoundaryDistanceMap* distance_map_ptr,
               const std::vector<nb::object>& region_polygons,
-              const std::vector<double>& region_sizes) {
+              const std::vector<double>& region_sizes,
+              const double region_transition) {
 
     // Pull the meshing criteria out of the Python config object while the GIL
     // is held; everything below this point is pure C++.
@@ -446,7 +467,8 @@ nb::dict mesh(const nb::object& py_config,
     for (size_t i = 0; i < region_shapes.size(); i++) {
         double size = i < region_sizes.size() ? region_sizes[i] : 0.0;
         if (size > 0) {
-            refinement_regions.push_back(RefinementRegion{&region_shapes[i], size});
+            refinement_regions.push_back(
+                RefinementRegion{&region_shapes[i], size, region_transition});
         }
     }
 
@@ -784,7 +806,7 @@ NB_MODULE(_cgal, m) {
     m.def("mesh", &mesh,
           "config"_a, "vertices"_a, "segments"_a, "seeds"_a,
           "distance_map"_a.none(),
-          "region_polygons"_a, "region_sizes"_a,
+          "region_polygons"_a, "region_sizes"_a, "region_transition"_a,
           R"pbdoc(
         Meshes a set of points and segments using CGAL.
         Args:
@@ -795,8 +817,10 @@ NB_MODULE(_cgal, m) {
             distance_map: Optional PolyBoundaryDistanceMap, or None.
             region_polygons: Shapely polygons that must be refined to a given
                 target edge length regardless of the boundary-distance field.
-            region_sizes: Per-region target edge lengths (in the same units as
-                the coordinates), parallel to region_polygons.
+            region_sizes: Per-region target edge lengths, parallel to
+                region_polygons.
+            region_transition: Distance over which the target size relaxes to
+                the background size into the region interior (0 = uniform).
         Returns:
             A dictionary containing the results of the meshing process.
     )pbdoc");
